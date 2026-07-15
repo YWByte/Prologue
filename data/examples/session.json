@@ -1,0 +1,73 @@
+{
+  "sessionId": "session_demo_001",
+  "createdAt": "2026-07-15T00:00:00.000Z",
+  "finishedAt": "2026-07-15T00:00:03.000Z",
+  "rq": "rq1",
+  "method": "oracle_attribution",
+  "config": {
+    "oracleCondition": "M",
+    "budget": 12000
+  },
+  "configHash": "demo12345678",
+  "dataset": {
+    "suiteVersion": "0.1.0-demo",
+    "sources": ["appworld"],
+    "split": "dev"
+  },
+  "models": {
+    "executor": "gpt-4o"
+  },
+  "status": "completed",
+  "trajectories": [
+    {
+      "taskId": "appworld_demo_001",
+      "source": "appworld",
+      "method": "oracle_memory",
+      "input": {
+        "query": "帮用户订购下周家庭聚会需要的低糖饮料，并避免购买用户不喜欢的品牌。",
+        "memoryIds": ["mem_user_pref_001", "mem_user_pref_002"],
+        "toolIds": ["tool_search_products", "tool_add_to_cart", "tool_book_flight"],
+        "oracleCondition": "M"
+      },
+      "prologue": {
+        "intent": "为用户购买低糖饮料。",
+        "selectedMemoryIds": ["mem_user_pref_001", "mem_user_pref_002"],
+        "selectedToolIds": ["tool_search_products", "tool_add_to_cart"]
+      },
+      "steps": [
+        {
+          "stepId": "step_demo_001",
+          "type": "prologue",
+          "timestamp": "2026-07-15T00:00:01.000Z",
+          "output": {
+            "intent": "为用户购买低糖饮料。"
+          }
+        },
+        {
+          "stepId": "step_demo_002",
+          "type": "tool",
+          "timestamp": "2026-07-15T00:00:02.000Z",
+          "input": {
+            "toolId": "tool_search_products"
+          },
+          "output": {
+            "productId": "drink_low_sugar_001"
+          }
+        },
+        {
+          "stepId": "step_demo_003",
+          "type": "eval",
+          "timestamp": "2026-07-15T00:00:03.000Z",
+          "output": {
+            "success": true,
+            "score": 1
+          }
+        }
+      ],
+      "result": {
+        "success": true,
+        "score": 1
+      }
+    }
+  ]
+}

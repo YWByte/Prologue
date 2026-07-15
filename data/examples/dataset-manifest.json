@@ -1,0 +1,17 @@
+{
+  "suiteVersion": "0.1.0-demo",
+  "schemaVersion": "0.1.0",
+  "createdAt": "2026-07-15T00:00:00.000Z",
+  "sources": ["appworld", "memoryagentbench"],
+  "taskCount": 2,
+  "splits": {
+    "dev": 2
+  },
+  "adapterVersions": {
+    "appworld": "0.1.0-demo",
+    "memoryagentbench": "0.1.0-demo"
+  },
+  "metadata": {
+    "purpose": "schema_example"
+  }
+}

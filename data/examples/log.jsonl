@@ -1,0 +1,3 @@
+{"eventId":"evt_demo_001","sessionId":"session_demo_001","timestamp":"2026-07-15T00:00:00.000Z","level":"info","type":"session_start","rq":"rq1","method":"oracle_attribution","payload":{"source":"appworld"}}
+{"eventId":"evt_demo_002","sessionId":"session_demo_001","timestamp":"2026-07-15T00:00:01.000Z","level":"info","type":"task_start","rq":"rq1","taskId":"appworld_demo_001","source":"appworld","method":"oracle_memory","payload":{"condition":"M"}}
+{"eventId":"evt_demo_003","sessionId":"session_demo_001","timestamp":"2026-07-15T00:00:02.000Z","level":"info","type":"eval_result","rq":"rq1","taskId":"appworld_demo_001","source":"appworld","method":"oracle_memory","payload":{"success":true,"score":1}}
