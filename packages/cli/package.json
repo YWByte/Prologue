@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@prologue/data": "workspace:*",
+    "@prologue/experiments": "workspace:*",
     "@prologue/session": "workspace:*"
   }
 }

@@ -26,3 +26,11 @@ export interface ToolSelector {
 export interface SufficiencyVerifier {
   verify(task: CanonicalTask, context: PrologueContext): Promise<VerifierOutput>;
 }
+
+export {
+  type Executor,
+  type ExecutorInput,
+  type ExecutorResult,
+  type ToolExecutor,
+  type ToolCallResult,
+} from "./executors.js";

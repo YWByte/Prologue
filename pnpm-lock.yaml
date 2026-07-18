@@ -26,6 +26,9 @@ importers:
       '@prologue/data':
         specifier: workspace:*
         version: link:../data
+      '@prologue/experiments':
+        specifier: workspace:*
+        version: link:../experiments
       '@prologue/session':
         specifier: workspace:*
         version: link:../session
