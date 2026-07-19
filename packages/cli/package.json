@@ -13,6 +13,7 @@
     "cli": "tsx src/index.ts"
   },
   "dependencies": {
+    "@prologue/common": "workspace:*",
     "@prologue/data": "workspace:*",
     "@prologue/experiments": "workspace:*",
     "@prologue/session": "workspace:*"

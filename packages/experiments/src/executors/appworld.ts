@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import type { LlmClient } from "@prologue/common";
 import type { Executor, ExecutorInput, ExecutorResult } from "@prologue/prologue";
 import { AppWorldServerManager } from "./appworld_server.js";
 import { AppWorldToolExecutor } from "./appworld_http.js";
 import { StubAppWorldAgent } from "./appworld_stub_agent.js";
+import { LlmAppWorldAgent } from "./appworld_llm_agent.js";
 import {
   initAppWorldTask,
   runAppWorldEval,
@@ -19,6 +21,14 @@ export type AppWorldExecutorConfig = {
   serverShutdownTimeoutMs: number;
   evalTimeoutMs: number;
   experimentNamePrefix: string;
+  /** LLM client for real agent mode. If undefined, uses stub agent. */
+  llm?: LlmClient;
+  /** Model name for LLM calls. */
+  llmModel?: string;
+  /** Enable Qwen3.5 thinking mode. Default false. */
+  enableThinking?: boolean;
+  /** Max agent steps. Default 40. */
+  maxSteps?: number;
 };
 
 const DEFAULT_CONFIG: Omit<AppWorldExecutorConfig, "appworldRoot" | "pythonPath" | "pythonScriptsDir"> = {
@@ -40,10 +50,10 @@ export function makeAppWorldExecutorConfig(
 let portCounter = 0;
 
 function nextPort(basePort: number): number {
-  // Per-condition port allocation. Sequential conditions in a single run
-  // will never collide (each takes basePort + N). 8 conditions per task;
-  // the % 8 keeps the port range tight.
-  portCounter = (portCounter + 1) % 8;
+  // Concurrent-safe port allocation: each call gets a unique increasing port.
+  // Uses a wide range so parallel runs in a worker pool won't collide.
+  // Range: basePort .. basePort + 1000 (supports up to 1000 concurrent runs).
+  portCounter = (portCounter + 1) % 1000;
   return basePort + portCounter;
 }
 
@@ -115,9 +125,29 @@ export class AppWorldExecutor implements Executor {
       }
 
       const toolExecutor = new AppWorldToolExecutor({ baseUrl: remoteApisUrl });
-      const agent = new StubAppWorldAgent({ toolExecutor, input });
-      const agentResult = await agent.run();
-      steps.push(...agentResult.steps);
+
+      let agentSteps: import("@prologue/schemas").TrajectoryStep[];
+      if (this.config.llm && this.config.llmModel) {
+        const agent = new LlmAppWorldAgent({
+          llm: this.config.llm,
+          model: this.config.llmModel,
+          toolExecutor,
+          input,
+          maxSteps: this.config.maxSteps,
+          enableThinking: this.config.enableThinking,
+        });
+        const agentResult = await agent.run();
+        agentSteps = agentResult.steps;
+        metadata.agentMode = "llm";
+        metadata.agentModel = this.config.llmModel;
+        metadata.agentSuccess = agentResult.success;
+      } else {
+        const agent = new StubAppWorldAgent({ toolExecutor, input });
+        const agentResult = await agent.run();
+        agentSteps = agentResult.steps;
+        metadata.agentMode = "stub";
+      }
+      steps.push(...agentSteps);
 
       const saveResult = await initAppWorldTask(
         {

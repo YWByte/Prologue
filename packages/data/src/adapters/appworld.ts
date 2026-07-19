@@ -65,6 +65,38 @@ function endpointKey(method: string, path: string): string {
   return `${method.toLowerCase()} ${path}`;
 }
 
+/**
+ * Match a concrete API call URL against OpenAPI template paths.
+ * Template paths contain {param} placeholders, e.g. /spotify/following_artists/{artist_id}.
+ * Concrete calls have actual values, e.g. /spotify/following_artists/14.
+ * We normalize both sides by replacing path segments that look like IDs
+ * (numeric, or non-operation keyword) with a wildcard, then return the
+ * matching template key.
+ */
+function matchEndpoint(
+  method: string,
+  concretePath: string,
+  templateKeys: Iterable<string>,
+): string | undefined {
+  const m = method.toLowerCase();
+  // Direct match (no path params)
+  const directKey = endpointKey(m, concretePath);
+  // Fast path: iterate templates and try matching
+  for (const key of templateKeys) {
+    if (key === directKey) return key;
+    const [keyMethod, template] = key.split(" ");
+    if (keyMethod !== m) continue;
+    // Convert template /spotify/following_artists/{artist_id} into regex
+    const regex = template
+      .replace(/[.+*?^$()|[\]\\]/g, "\\$&")
+      .replace(/\{[^}]+\}/g, "[^/]+");
+    if (new RegExp(`^${regex}$`).test(concretePath)) {
+      return key;
+    }
+  }
+  return undefined;
+}
+
 async function loadTools(apiDocsRoot: string, apps: string[]): Promise<LoadedTools> {
   const tools: ToolItem[] = [];
   const operationByEndpoint = new Map<string, string>();
@@ -97,6 +129,54 @@ async function loadTools(apiDocsRoot: string, apps: string[]): Promise<LoadedToo
   }
 
   return { tools, operationByEndpoint };
+}
+
+const READ_TOOL_PATTERNS = ["show", "search", "list", "get", "current", "profile", "directory"];
+const MUTATION_TOOL_PATTERNS = ["create", "update", "delete", "move", "follow", "send", "add", "remove", "like", "unlike"];
+
+function matchesAnyPattern(operationId: string, patterns: string[]): boolean {
+  const name = operationId.toLowerCase();
+  return patterns.some((pattern) => name.includes(pattern));
+}
+
+function buildOracleToolIds(tools: ToolItem[], requiredApps: string[], groundTruthToolIds: string[]): string[] {
+  const requiredAppSet = new Set(["supervisor", ...requiredApps]);
+  const groundTruthSet = new Set(groundTruthToolIds);
+  const selected = new Set<string>();
+
+  for (const tool of tools) {
+    const app = typeof tool.metadata?.app === "string" ? tool.metadata.app : undefined;
+    if (!app || !requiredAppSet.has(app)) continue;
+
+    if (app === "supervisor") {
+      if (
+        tool.id === "supervisor__show_profile" ||
+        tool.id === "supervisor__show_account_passwords" ||
+        tool.id === "supervisor__show_active_task" ||
+        tool.id === "supervisor__complete_task"
+      ) {
+        selected.add(tool.id);
+      }
+      continue;
+    }
+
+    if (tool.id === `${app}__login`) {
+      selected.add(tool.id);
+      continue;
+    }
+
+    if (matchesAnyPattern(tool.id, READ_TOOL_PATTERNS)) {
+      selected.add(tool.id);
+      continue;
+    }
+
+    if (groundTruthSet.has(tool.id) && matchesAnyPattern(tool.id, MUTATION_TOOL_PATTERNS)) {
+      selected.add(tool.id);
+    }
+  }
+
+  for (const id of groundTruthToolIds) selected.add(id);
+  return tools.filter((tool) => selected.has(tool.id)).map((tool) => tool.id);
 }
 
 async function querySpotifyLibrarySummary(dbPath: string, user: Record<string, unknown>, genre: string | undefined, limit: number): Promise<Record<string, unknown>> {
@@ -175,7 +255,7 @@ async function buildSpotifyUserLibraryMemory(taskId: string, dataRoot: string, s
     type: "state",
     content: JSON.stringify(await querySpotifyLibrarySummary(dbPath, users[0], genre, limit)),
     source: "appworld.base_dbs.spotify",
-    metadata: { oracle: true, app: "spotify", dbPath, genre, limit },
+    metadata: { oracle: true, memoryRole: "oracle", app: "spotify", dbPath, genre, limit },
   };
 }
 
@@ -198,7 +278,7 @@ async function buildOtherUserSpotifyLibraryMemory(taskId: string, dataRoot: stri
     type: "state",
     content: JSON.stringify(await querySpotifyLibrarySummary(dbPath, users[0], genre, limit)),
     source: "appworld.base_dbs.spotify",
-    metadata: { oracle: false, app: "spotify", dbPath, genre, limit, distractorType: "same_domain_wrong_user" },
+    metadata: { oracle: false, memoryRole: "distractor", app: "spotify", dbPath, genre, limit, distractorType: "same_domain_wrong_user" },
   };
 }
 
@@ -220,7 +300,7 @@ async function buildCrossDomainAppMemory(taskId: string, dataRoot: string, app: 
     type: "state",
     content: JSON.stringify({ app, tableCounts }),
     source: `appworld.base_dbs.${app}`,
-    metadata: { oracle: false, app, dbPath, distractorType: "cross_domain_app_state" },
+    metadata: { oracle: false, memoryRole: "distractor", app, dbPath, distractorType: "cross_domain_app_state" },
   };
 }
 
@@ -271,24 +351,19 @@ function parseSupervisorPatch(patchText: string): {
   return result;
 }
 
-async function buildSupervisorFullProfileMemory(taskId: string, taskRoot: string, specs: AppWorldSpecs): Promise<MemoryItem | undefined> {
+async function buildSupervisorAuthMemory(taskId: string, taskRoot: string, specs: AppWorldSpecs): Promise<MemoryItem | undefined> {
   const patchText = await readTextIfExists(join(taskRoot, "dbs", "supervisor.jsonl"));
   if (!patchText) return undefined;
   const patch = parseSupervisorPatch(patchText);
-  if (!patch.supervisor) return undefined;
+  if (patch.accountPasswords.length === 0) return undefined;
 
   return {
-    id: `${taskId}:memory:supervisor_full_profile`,
+    id: `${taskId}:memory:auth_account_passwords`,
     type: "profile",
-    content: JSON.stringify({
-      supervisor: patch.supervisor,
-      accountPasswords: patch.accountPasswords,
-      addresses: patch.addresses,
-      paymentCards: patch.paymentCards,
-    }),
-    source: "appworld.task.dbs.supervisor",
+    content: JSON.stringify({ accountPasswords: patch.accountPasswords }),
+    source: "appworld.task.dbs.supervisor.account_passwords",
     timestamp: specs.datetime,
-    metadata: { oracle: true },
+    metadata: { oracle: false, memoryRole: "common", auth: true },
   };
 }
 
@@ -349,8 +424,45 @@ async function buildAppUserLibraryMemory(taskId: string, dataRoot: string, app: 
     type: "state",
     content: JSON.stringify({ app, user: userRecord, library: librarySummary }),
     source: `appworld.base_dbs.${app}`,
-    metadata: { oracle: true, app, dbPath, userId },
+    metadata: { oracle: true, memoryRole: "oracle", app, dbPath, userId },
   };
+}
+
+function inferOperationalHints(specs: AppWorldSpecs, publicData: unknown): string[] {
+  if (!publicData || typeof publicData !== "object") return [];
+  const data = publicData as Record<string, unknown>;
+  const hints: string[] = [];
+
+  if (typeof data.sent_received === "string") {
+    hints.push(`transaction direction = ${data.sent_received}`);
+  }
+
+  if (data.threshold_duration === "month" && specs.datetime) {
+    const match = specs.datetime.match(/^(\d{4})-(\d{2})/);
+    if (match) {
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      const lastDay = new Date(year, month, 0).getDate();
+      const mm = String(month).padStart(2, "0");
+      hints.push(`this month date range = ${year}-${mm}-01T00:00:00 to ${year}-${mm}-${String(lastDay).padStart(2, "0")}T23:59:59`);
+      hints.push(`when available, use min_created_at=${year}-${mm}-01T00:00:00 and max_created_at=${year}-${mm}-${String(lastDay).padStart(2, "0")}T23:59:59`);
+    }
+  }
+
+  if (typeof data.genre === "string") hints.push(`genre = ${data.genre}`);
+  if (typeof data.min_followers === "number") hints.push(`minimum followers = ${data.min_followers}`);
+  if (typeof data.top_k === "number") hints.push(`top_k = ${data.top_k}`);
+  if (typeof data.contact_relation === "string") hints.push(`contact relationship = ${data.contact_relation}`);
+  if (typeof data.transaction_description === "string") hints.push(`transaction description = ${data.transaction_description}`);
+
+  return hints;
+}
+
+function describePublicData(specs: AppWorldSpecs, publicData: unknown): string {
+  return JSON.stringify({
+    constraints: publicData,
+    operationalHints: inferOperationalHints(specs, publicData),
+  });
 }
 
 async function buildMemoryPool(taskId: string, taskRoot: string, dataRoot: string, specs: AppWorldSpecs, publicData: unknown, requiredApps: string[]): Promise<MemoryItem[]> {
@@ -364,21 +476,21 @@ async function buildMemoryPool(taskId: string, taskRoot: string, dataRoot: strin
       content: JSON.stringify(specs.supervisor),
       source: "appworld.specs.supervisor",
       timestamp: specs.datetime,
-      metadata: { oracle: false },
+      metadata: { oracle: false, memoryRole: "common" },
     });
   }
 
-  // Add full supervisor profile from task DB patch (oracle: includes account_passwords, addresses, payment_cards)
-  const supervisorFullProfile = await buildSupervisorFullProfileMemory(taskId, taskRoot, specs);
-  if (supervisorFullProfile) memory.push(supervisorFullProfile);
+  // Add auth-only account passwords as common runtime context.
+  const supervisorAuth = await buildSupervisorAuthMemory(taskId, taskRoot, specs);
+  if (supervisorAuth) memory.push(supervisorAuth);
 
   if (publicData && JSON.stringify(publicData) !== "{}") {
     memory.push({
       id: `${taskId}:memory:public_data`,
       type: "evidence",
-      content: JSON.stringify(publicData),
+      content: describePublicData(specs, publicData),
       source: "appworld.ground_truth.public_data",
-      metadata: { oracle: true },
+      metadata: { oracle: true, memoryRole: "oracle" },
     });
   }
 
@@ -388,7 +500,7 @@ async function buildMemoryPool(taskId: string, taskRoot: string, dataRoot: strin
       type: "state",
       content: JSON.stringify({ requiredApps }),
       source: "appworld.ground_truth.required_apps",
-      metadata: { oracle: false },
+      metadata: { oracle: false, memoryRole: "common" },
     });
   }
 
@@ -420,8 +532,14 @@ async function buildMemoryPool(taskId: string, taskRoot: string, dataRoot: strin
 }
 
 function inferOracleIntent(specs: AppWorldSpecs, publicData: unknown): string {
-  const constraints = publicData && JSON.stringify(publicData) !== "{}" ? ` Constraints: ${JSON.stringify(publicData)}.` : "";
-  return `${specs.instruction}${constraints}`;
+  const hasPublicData = publicData && JSON.stringify(publicData) !== "{}";
+  if (!hasPublicData) return specs.instruction;
+
+  const hints = inferOperationalHints(specs, publicData);
+  const hintText = hints.length > 0
+    ? hints.map((hint) => `- ${hint}`).join("\n")
+    : `- task constraints = ${JSON.stringify(publicData)}`;
+  return `${specs.instruction}\nOperational constraints:\n${hintText}`;
 }
 
 export class AppWorldAdapter implements DatasetAdapter {
@@ -461,16 +579,22 @@ export class AppWorldAdapter implements DatasetAdapter {
       const distractorApp = DEFAULT_DISTRACTOR_APPS.find((app) => !requiredApps.includes(app));
       const toolApps = ["supervisor", ...requiredApps, ...(distractorApp ? [distractorApp] : [])];
       const { tools, operationByEndpoint } = await loadTools(apiDocsRoot, toolApps);
-      const oracleToolIds = Array.from(
+      const groundTruthToolIds = Array.from(
         new Set(
           apiCalls
-            .map((call) => operationByEndpoint.get(endpointKey(call.method, call.url)))
+            .map((call) => {
+              const key = matchEndpoint(call.method, call.url, operationByEndpoint.keys());
+              return key ? operationByEndpoint.get(key) : undefined;
+            })
             .filter((operationId): operationId is string => Boolean(operationId)),
         ),
       );
+      const oracleToolIds = buildOracleToolIds(tools, requiredApps, groundTruthToolIds);
 
       const memoryPool = await buildMemoryPool(taskId, taskRoot, dataRoot, specs, publicData, requiredApps);
-      const oracleMemoryIds = memoryPool.filter((item) => item.metadata.oracle === true).map((item) => item.id);
+      const commonMemoryIds = memoryPool.filter((item) => item.metadata.memoryRole === "common").map((item) => item.id);
+      const oracleMemoryIds = memoryPool.filter((item) => item.metadata.memoryRole === "oracle").map((item) => item.id);
+      const distractorMemoryIds = memoryPool.filter((item) => item.metadata.memoryRole === "distractor").map((item) => item.id);
       const domains = requiredApps.length > 0 ? requiredApps.join("+") : "unknown";
 
       yield {
@@ -481,7 +605,9 @@ export class AppWorldAdapter implements DatasetAdapter {
         query: specs.instruction,
         oracleIntent: inferOracleIntent(specs, publicData),
         memoryPool,
+        commonMemoryIds,
         oracleMemoryIds,
+        distractorMemoryIds,
         toolPool: tools,
         oracleToolIds,
         evaluator: {
@@ -509,6 +635,7 @@ export class AppWorldAdapter implements DatasetAdapter {
           appCount: requiredApps.length,
           toolAppCount: toolApps.length,
           apiCallCount: apiCalls.length,
+          groundTruthToolIds,
           benchmarkMetadata: metadata,
           dbFiles: await readdir(join(taskRoot, "dbs")),
           specs: {

@@ -4,10 +4,18 @@ export type TokenUsage = {
   total: number;
 };
 
+export type LlmMessage = {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+};
+
 export type LlmCallInput = {
   model: string;
-  messages: Array<{ role: string; content: string }>;
+  messages: LlmMessage[];
   temperature?: number;
+  maxTokens?: number;
+  stop?: string[];
+  enableThinking?: boolean;
 };
 
 export type LlmCallOutput = {
@@ -25,3 +33,20 @@ export type EvalResult = {
   score?: number;
   reason?: string;
 };
+
+export {
+  OpenAiCompatibleClient,
+  type ProviderConfig,
+  type SiliconFlowConfig,
+  createSiliconFlowClient,
+  createSiliconFlowClientFromEnv,
+  createClient,
+  createClientFromEnv,
+  registerProvider,
+  listProviders,
+  PROVIDERS,
+  type ProviderFactory,
+  type ProviderSpec,
+} from "./providers/index.js";
+
+export { loadEnvFile, loadEnvIntoProcess } from "./env.js";

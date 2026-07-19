@@ -35,15 +35,34 @@ export type AppWorldToolExecutorConfig = {
  *
  * The caller is responsible for auth: either pass `access_token` as a field
  * in `args` (AppWorld's convention; this class converts it to a Bearer header)
- * or call `setAccessToken(...)` once after login.
+ * or call `setAccessToken(app, token)` once after login.
  */
 export class AppWorldToolExecutor implements ToolExecutor {
-  private accessToken: string | null = null;
+  private readonly accessTokensByApp = new Map<string, string>();
+  private defaultAccessToken: string | null = null;
 
   constructor(private readonly config: AppWorldToolExecutorConfig) {}
 
-  setAccessToken(token: string | null): void {
-    this.accessToken = token;
+  setAccessToken(token: string | null): void;
+  setAccessToken(app: string, token: string | null): void;
+  setAccessToken(appOrToken: string | null, token?: string | null): void {
+    if (token === undefined) {
+      this.defaultAccessToken = appOrToken;
+      return;
+    }
+
+    if (token === null) {
+      this.accessTokensByApp.delete(String(appOrToken));
+    } else {
+      this.accessTokensByApp.set(String(appOrToken), token);
+    }
+  }
+
+  getAccessToken(): string | null;
+  getAccessToken(app: string): string | null;
+  getAccessToken(app?: string): string | null {
+    if (app) return this.accessTokensByApp.get(app) ?? null;
+    return this.defaultAccessToken;
   }
 
   async call(tool: ToolItem, args: Record<string, unknown>): Promise<ToolCallResult> {
@@ -85,8 +104,9 @@ export class AppWorldToolExecutor implements ToolExecutor {
     if (typeof remaining.access_token === "string") {
       headers["Authorization"] = `Bearer ${remaining.access_token}`;
       delete remaining.access_token;
-    } else if (this.accessToken) {
-      headers["Authorization"] = `Bearer ${this.accessToken}`;
+    } else {
+      const token = this.getAccessToken(metadata.app) ?? this.getAccessToken();
+      if (token) headers["Authorization"] = `Bearer ${token}`;
     }
 
     // Body: form-urlencoded if the OpenAPI content-type says so, else JSON.
@@ -102,7 +122,7 @@ export class AppWorldToolExecutor implements ToolExecutor {
         : "application/json";
     }
 
-    const url = new URL(`${this.config.baseUrl}${path}`);
+    const url = new URL(`${this.config.baseUrl}${urlPath}`);
     for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
 
     try {
@@ -114,7 +134,9 @@ export class AppWorldToolExecutor implements ToolExecutor {
       } catch {
         parsed = { raw: text };
       }
-      const ok = res.status === 200;
+      // 2xx = success; 4xx = client error (return structured error for LLM);
+      // 5xx = server error (return as error)
+      const ok = res.status >= 200 && res.status < 300;
       return {
         ok,
         status: res.status,

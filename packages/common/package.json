@@ -13,6 +13,7 @@
   "dependencies": {
     "@prologue/log": "workspace:*",
     "@prologue/schemas": "workspace:*",
-    "@prologue/session": "workspace:*"
+    "@prologue/session": "workspace:*",
+    "dotenv": "^16.4.7"
   }
 }

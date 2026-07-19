@@ -241,7 +241,7 @@ export class StubAppWorldAgent {
         );
       }
     }
-    toolExecutor.setAccessToken(accessToken ?? null);
+    toolExecutor.setAccessToken("spotify", accessToken ?? null);
 
     // 4-6. spotify__show_*_library (page_limit=20 — large enough for the sample)
     await this.callTool(

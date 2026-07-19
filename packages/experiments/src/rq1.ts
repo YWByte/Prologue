@@ -56,6 +56,25 @@ function selectByIds<T extends { id: string }>(items: T[], ids: string[], label:
   return selected;
 }
 
+function uniqueById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
+function fallbackCommonMemory(memoryPool: MemoryItem[]): MemoryItem[] {
+  return memoryPool.filter((item) => {
+    const metadata = item.metadata as Record<string, unknown>;
+    if (metadata.oracle === true) return false;
+    if (typeof metadata.distractorType === "string") return false;
+    if (item.id.includes(":memory:distractor:")) return false;
+    return true;
+  });
+}
+
 export function buildRq1Input(task: CanonicalTask, condition: Rq1Condition): Rq1ExperimentInput {
   const usesOracleIntent = hasOracleIntent(condition);
   const usesOracleMemory = hasOracleMemory(condition);
@@ -71,13 +90,20 @@ export function buildRq1Input(task: CanonicalTask, condition: Rq1Condition): Rq1
     throw new Error(`Task ${task.taskId} does not provide oracleToolIds.`);
   }
 
+  const commonMemory = task.commonMemoryIds.length > 0
+    ? selectByIds(task.memoryPool, task.commonMemoryIds, "common memory", task.taskId)
+    : fallbackCommonMemory(task.memoryPool);
+  const oracleMemory = usesOracleMemory
+    ? selectByIds(task.memoryPool, task.oracleMemoryIds, "memory", task.taskId)
+    : [];
+
   return {
     taskId: task.taskId,
     source: task.source,
     condition,
     query: task.query,
     intentSpec: usesOracleIntent ? task.oracleIntent : undefined,
-    memory: usesOracleMemory ? selectByIds(task.memoryPool, task.oracleMemoryIds, "memory", task.taskId) : task.memoryPool,
+    memory: uniqueById([...commonMemory, ...oracleMemory]),
     tools: usesOracleTool ? selectByIds(task.toolPool, task.oracleToolIds, "tool", task.taskId) : task.toolPool,
     usesOracleIntent,
     usesOracleMemory,

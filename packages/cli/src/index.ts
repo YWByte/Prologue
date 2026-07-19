@@ -4,6 +4,7 @@ import { dirname, join, isAbsolute } from "node:path";
 import { mkdir, stat } from "node:fs/promises";
 import { AppWorldAdapter, buildDatasetManifest, readCanonicalTasks, writeCanonicalTasks, writeDatasetManifest } from "@prologue/data";
 import { AppWorldExecutor, makeAppWorldExecutorConfig, runRq1Mock, runRq1Real } from "@prologue/experiments";
+import { createClientFromEnv, loadEnvIntoProcess } from "@prologue/common";
 import { Session } from "@prologue/session";
 
 type Args = Record<string, string | boolean>;
@@ -43,6 +44,8 @@ function printHelp(): void {
     "  rq1:mock --tasks <canonical-task-jsonl>",
     "  rq1:run  --tasks <canonical-task-jsonl> [--appworld-root <path>] [--python <path>] [--base-port <n>]",
     "           [--experiment-name-prefix <str>]",
+    "           [--llm-provider siliconflow] [--llm-model Qwen/Qwen3.5-9B] [--enable-thinking]",
+    "           [--max-steps 40]",
   ].join("\n"));
 }
 
@@ -119,6 +122,7 @@ async function runRq1MockCommand(args: Args): Promise<void> {
 }
 
 async function runRq1RunCommand(args: Args): Promise<void> {
+  loadEnvIntoProcess();
   const tasksPath = resolveWorkspacePath(requiredString(args, "tasks"));
   const appworldRoot =
     (typeof args.appworldRoot === "string" ? args.appworldRoot : undefined) ??
@@ -132,6 +136,11 @@ async function runRq1RunCommand(args: Args): Promise<void> {
   const experimentNamePrefix =
     (typeof args.experimentNamePrefix === "string" ? args.experimentNamePrefix : undefined) ??
     "prologue_rq1";
+
+  const llmProvider = typeof args.llmProvider === "string" ? args.llmProvider : undefined;
+  const llmModel = typeof args.llmModel === "string" ? args.llmModel : undefined;
+  const enableThinking = args.enableThinking === true;
+  const maxSteps = typeof args.maxSteps === "string" ? Number(args.maxSteps) : undefined;
 
   const workspaceRoot = process.env.INIT_CWD ?? process.cwd();
   const pythonScriptsDir = join(workspaceRoot, "python", "appworld");
@@ -152,15 +161,22 @@ async function runRq1RunCommand(args: Args): Promise<void> {
 
   const tasks = await readCanonicalTasks(tasksPath);
 
+  const llmClient = llmProvider ? createClientFromEnv(llmProvider) : undefined;
+
   const session = await Session.start({
     rq: "rq1",
     method: "oracle_attribution_real",
-    config: { tasksPath, appworldRoot, pythonPath, basePort, experimentNamePrefix, pythonScriptsDir },
+    config: { tasksPath, appworldRoot, pythonPath, basePort, experimentNamePrefix, pythonScriptsDir, llmProvider, llmModel, enableThinking, maxSteps },
     dataset: {
       taskCount: tasks.length,
       sources: Array.from(new Set(tasks.map((task) => task.source))),
     },
-    models: { executor: "appworld_stub", agent: "stub_fixed_sequence" },
+    models: {
+      executor: llmClient && llmModel ? "appworld_llm" : "appworld_stub",
+      agent: llmClient && llmModel ? "llm_react" : "stub_fixed_sequence",
+      llmProvider: llmProvider ?? "none",
+      llmModel: llmModel ?? "none",
+    },
     runsRoot: join(workspaceRoot, "runs"),
   });
 
@@ -171,6 +187,14 @@ async function runRq1RunCommand(args: Args): Promise<void> {
       pythonScriptsDir,
       basePort,
       experimentNamePrefix,
+      ...(llmClient && llmModel
+        ? {
+            llm: llmClient,
+            llmModel,
+            enableThinking,
+            maxSteps: maxSteps ?? 40,
+          }
+        : {}),
     }),
   );
 
