@@ -89,7 +89,7 @@ export async function runRq1Real(
           condition,
           success: result.success,
           score: result.score,
-          reason: result.reason,
+          error: result.reason,
           experimentName: result.metadata?.experimentName,
         },
       });
@@ -115,7 +115,7 @@ export async function runRq1Real(
         result: {
           success: result.success,
           score: result.score,
-          reason: result.reason,
+          error: result.reason,
         },
       });
       await session.flush();

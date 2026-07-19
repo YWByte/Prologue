@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-07-19
+
+- AppWorld adapter 0.1.5 → 0.2.0：补全非 spotify app 的 oracle memory 抽取。
+- 新增 `supervisor_full_profile` oracle memory：解析 task-level `dbs/supervisor.jsonl`，抽取 supervisor 档案、account_passwords、addresses、payment_cards。
+- 新增通用 `app_user_library:{app}` oracle memory：自动检测 users 表 schema，按 email/phone 定位用户，扫描所有含 `user_id` 列的表，抽取 count + 3 条样本。
+- spotify 保留专用 genre-aware 抽取逻辑，其他 app（venmo / file_system / phone / simple_note 等）走通用方案。
+- 修复 split 自动标注：adapter 从 `datasets/*.txt` 读取 taskId → split 映射，不再信任 manifest 的 split 字段。
+- 修复 `dataRoot` 路径识别：支持 `sample_5` 后缀。
+- 删除未使用的 `SupervisorPatchRow` 类型。
+- schema 清理：`AgentTrajectory.result` 移除冗余 `reason` 字段，统一用 `error`。
+- `rq1.real.ts` 同步 `reason → error` 字段映射。
+- 新增 `sample_5`：5 个代表性 A 批任务（spotify/venmo/file_system/multi_app_3/pub_empty）。
+- 在 sample_5 跑通 stub 验证：5 × 8 = 40 runs，adapter 在多 app 任务上全部产出合法 canonical task。
+- 重写 `exp.md`：每个 RQ 统一格式（作用/要证明/实验/指标/数据/预期），B 批定位为 RQ2 test 端到端评测集。
+
 ## 2026-07-18
 
 - 实现 RQ1 真实 executor:驱动 AppWorld REST API server → 持久化 DB 改动 → 调官方 `evaluate_task`。

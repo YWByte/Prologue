@@ -139,7 +139,6 @@ export const agentTrajectorySchema = z.object({
   result: z.object({
     success: z.boolean(),
     score: z.number().optional(),
-    reason: z.string().optional(),
     error: z.string().optional(),
   }),
 });

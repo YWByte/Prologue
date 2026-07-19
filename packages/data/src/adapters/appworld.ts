@@ -224,34 +224,139 @@ async function buildCrossDomainAppMemory(taskId: string, dataRoot: string, app: 
   };
 }
 
-async function buildAppDbMemory(taskId: string, taskRoot: string, app: string, oracle: boolean): Promise<MemoryItem> {
-  const dbPatchPath = join(taskRoot, "dbs", `${app}.jsonl`);
-  const rawPatch = (await readTextIfExists(dbPatchPath)) ?? "";
-  const patchLines = rawPatch.split("\n").filter(Boolean);
-  const patchSample = patchLines.slice(0, 3).map((line) => JSON.parse(line) as unknown);
+function parseSupervisorPatch(patchText: string): {
+  supervisor?: Record<string, unknown>;
+  accountPasswords: Array<{ account_name: string; password: string }>;
+  addresses: Array<Record<string, unknown>>;
+  paymentCards: Array<Record<string, unknown>>;
+} {
+  const result: {
+    supervisor?: Record<string, unknown>;
+    accountPasswords: Array<{ account_name: string; password: string }>;
+    addresses: Array<Record<string, unknown>>;
+    paymentCards: Array<Record<string, unknown>>;
+  } = { accountPasswords: [], addresses: [], paymentCards: [] };
+  if (!patchText.trim()) return result;
+
+  const lines = patchText.split("\n").filter(Boolean);
+  const columnsByTable: Record<string, string[]> = {};
+
+  for (const line of lines) {
+    const parsed = JSON.parse(line) as [string, unknown[], boolean];
+    const sql = parsed[0];
+    const values = parsed[1] as unknown[];
+
+    // extract table name
+    const tableMatch = sql.match(/INSERT INTO (\w+)/);
+    if (!tableMatch) continue;
+    const table = tableMatch[1];
+
+    // extract column names
+    if (!columnsByTable[table]) {
+      const colsMatch = sql.match(/INSERT INTO \w+\s*\(([^)]+)\)/);
+      if (colsMatch) columnsByTable[table] = colsMatch[1].split(",").map((c) => c.trim());
+    }
+    const cols = columnsByTable[table] ?? [];
+
+    // build row object
+    const row: Record<string, unknown> = {};
+    cols.forEach((col, i) => { row[col] = values[i]; });
+
+    if (table === "supervisors" && !result.supervisor) result.supervisor = row;
+    else if (table === "account_passwords") result.accountPasswords.push({ account_name: String(row.account_name), password: String(row.password) });
+    else if (table === "addresses") result.addresses.push(row);
+    else if (table === "payment_cards") result.paymentCards.push(row);
+  }
+
+  return result;
+}
+
+async function buildSupervisorFullProfileMemory(taskId: string, taskRoot: string, specs: AppWorldSpecs): Promise<MemoryItem | undefined> {
+  const patchText = await readTextIfExists(join(taskRoot, "dbs", "supervisor.jsonl"));
+  if (!patchText) return undefined;
+  const patch = parseSupervisorPatch(patchText);
+  if (!patch.supervisor) return undefined;
 
   return {
-    id: `${taskId}:memory:app_db:${app}`,
-    type: "state",
+    id: `${taskId}:memory:supervisor_full_profile`,
+    type: "profile",
     content: JSON.stringify({
-      app,
-      taskDbPatchLineCount: patchLines.length,
-      taskDbPatchSample: patchSample,
-      note: patchLines.length > 0 ? "Task-specific app DB patch." : "No task-specific patch; app state comes from the AppWorld base DB.",
+      supervisor: patch.supervisor,
+      accountPasswords: patch.accountPasswords,
+      addresses: patch.addresses,
+      paymentCards: patch.paymentCards,
     }),
-    source: `appworld.task.dbs.${app}`,
-    metadata: {
-      oracle,
-      app,
-      taskDbPatchPath: dbPatchPath,
-      taskDbPatchBytes: rawPatch.length,
-    },
+    source: "appworld.task.dbs.supervisor",
+    timestamp: specs.datetime,
+    metadata: { oracle: true },
+  };
+}
+
+async function buildAppUserLibraryMemory(taskId: string, dataRoot: string, app: string, supervisorEmail: string | undefined, supervisorPhone: string | undefined): Promise<MemoryItem | undefined> {
+  const dbPath = join(dataRoot, "base_dbs", `${app}.db`);
+
+  // Check what columns the users table actually has
+  const userCols = await querySqliteJson<{ name: string }>(dbPath, `PRAGMA table_info(users)`);
+  const colNames = new Set(userCols.map((c) => c.name));
+  const selectCols = ["id", "first_name", "last_name"];
+  if (colNames.has("email")) selectCols.push("email");
+  if (colNames.has("phone_number")) selectCols.push("phone_number");
+  const selectClause = selectCols.join(", ");
+
+  // Find user by email or phone
+  let userRecord: Record<string, unknown> | undefined;
+  if (supervisorEmail && colNames.has("email")) {
+    userRecord = (await querySqliteJson<Record<string, unknown>>(
+      dbPath,
+      `SELECT ${selectClause} FROM users WHERE email='${sqlString(supervisorEmail)}' LIMIT 1`,
+    ))[0];
+  }
+  if (!userRecord && supervisorPhone && colNames.has("phone_number")) {
+    userRecord = (await querySqliteJson<Record<string, unknown>>(
+      dbPath,
+      `SELECT ${selectClause} FROM users WHERE phone_number='${sqlString(supervisorPhone)}' LIMIT 1`,
+    ))[0];
+  }
+  if (!userRecord) return undefined;
+
+  const userId = userRecord.id;
+  if (typeof userId !== "number") return undefined;
+
+  // Get all tables that have user_id column
+  const tablesWithUserId = await querySqliteJson<{ name: string }>(
+    dbPath,
+    `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '%_fts%' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_config%' AND name NOT LIKE '%_data%' AND name NOT LIKE '%_docsize%' AND name NOT LIKE '%_idx%' AND name NOT LIKE '%_content%'`,
+  );
+
+  const librarySummary: Record<string, { count: number; sample: unknown[] }> = {};
+  for (const { name: table } of tablesWithUserId) {
+    // check if this table has user_id column
+    const cols = await querySqliteJson<{ name: string }>(dbPath, `PRAGMA table_info(${table})`);
+    const hasUserId = cols.some((c) => c.name === "user_id");
+    if (!hasUserId) continue;
+
+    const count = (await querySqliteJson<{ count: number }>(dbPath, `SELECT COUNT(*) AS count FROM ${table} WHERE user_id=${userId}`))[0]?.count ?? 0;
+    if (count === 0) continue;
+
+    const sample = await querySqliteJson<Record<string, unknown>>(dbPath, `SELECT * FROM ${table} WHERE user_id=${userId} LIMIT 3`);
+    librarySummary[table] = { count, sample: sample.slice(0, 3) };
+  }
+
+  if (Object.keys(librarySummary).length === 0) return undefined;
+
+  return {
+    id: `${taskId}:memory:app_user_library:${app}`,
+    type: "state",
+    content: JSON.stringify({ app, user: userRecord, library: librarySummary }),
+    source: `appworld.base_dbs.${app}`,
+    metadata: { oracle: true, app, dbPath, userId },
   };
 }
 
 async function buildMemoryPool(taskId: string, taskRoot: string, dataRoot: string, specs: AppWorldSpecs, publicData: unknown, requiredApps: string[]): Promise<MemoryItem[]> {
   const memory: MemoryItem[] = [];
 
+  // Keep specs.supervisor as basic profile (non-oracle)
   if (specs.supervisor) {
     memory.push({
       id: `${taskId}:memory:supervisor_profile`,
@@ -262,6 +367,10 @@ async function buildMemoryPool(taskId: string, taskRoot: string, dataRoot: strin
       metadata: { oracle: false },
     });
   }
+
+  // Add full supervisor profile from task DB patch (oracle: includes account_passwords, addresses, payment_cards)
+  const supervisorFullProfile = await buildSupervisorFullProfileMemory(taskId, taskRoot, specs);
+  if (supervisorFullProfile) memory.push(supervisorFullProfile);
 
   if (publicData && JSON.stringify(publicData) !== "{}") {
     memory.push({
@@ -283,16 +392,25 @@ async function buildMemoryPool(taskId: string, taskRoot: string, dataRoot: strin
     });
   }
 
+  // Extract supervisor email/phone for user lookup in each app
+  const supervisorEmail = typeof specs.supervisor?.email === "string" ? specs.supervisor.email : undefined;
+  const supervisorPhone = typeof specs.supervisor?.phone_number === "string" ? specs.supervisor.phone_number : undefined;
+
   for (const app of requiredApps) {
-    memory.push(await buildAppDbMemory(taskId, taskRoot, app, false));
+    // Spotify: use specialized library summary (genre-aware)
     if (app === "spotify") {
       const spotifySummary = await buildSpotifyUserLibraryMemory(taskId, dataRoot, specs, publicData);
       if (spotifySummary) memory.push(spotifySummary);
       const otherUserSummary = await buildOtherUserSpotifyLibraryMemory(taskId, dataRoot, specs, publicData);
       if (otherUserSummary) memory.push(otherUserSummary);
+    } else {
+      // Other apps: use generic app user library summary
+      const appLibrary = await buildAppUserLibraryMemory(taskId, dataRoot, app, supervisorEmail, supervisorPhone);
+      if (appLibrary) memory.push(appLibrary);
     }
   }
 
+  // Add cross-domain distractor memory
   for (const app of DEFAULT_DISTRACTOR_APPS.filter((candidate) => !requiredApps.includes(candidate))) {
     const crossDomainMemory = await buildCrossDomainAppMemory(taskId, dataRoot, app);
     if (crossDomainMemory) memory.push(crossDomainMemory);
@@ -308,14 +426,27 @@ function inferOracleIntent(specs: AppWorldSpecs, publicData: unknown): string {
 
 export class AppWorldAdapter implements DatasetAdapter {
   readonly source = "appworld";
-  readonly version = "0.1.5";
+  readonly version = "0.2.0";
 
   async *convert(rawRoot: string): AsyncIterable<CanonicalTask> {
     const manifest = await readJsonIfExists<{ split?: string; taskIds?: string[] }>(join(rawRoot, "sample-manifest.json"), {});
-    const split = manifest.split ?? "dev";
-    const taskIds = manifest.taskIds ?? (await readFile(join(rawRoot, "datasets", `${split}.txt`), "utf8")).split("\n").filter(Boolean);
-    const dataRoot = rawRoot.endsWith("sample") ? join(rawRoot, "..", "data") : rawRoot;
+    const manifestSplit = manifest.split ?? "dev";
+    const taskIds = manifest.taskIds ?? (await readFile(join(rawRoot, "datasets", `${manifestSplit}.txt`), "utf8")).split("\n").filter(Boolean);
+    const dataRoot = rawRoot.endsWith("sample") || rawRoot.endsWith("sample_5") ? join(rawRoot, "..", "data") : rawRoot;
     const apiDocsRoot = join(dataRoot, "api_docs");
+
+    // Build taskId -> actual split map from datasets/*.txt
+    const splitByTaskId = new Map<string, "train" | "dev" | "test">();
+    for (const splitName of ["train", "dev", "test_normal", "test_challenge"] as const) {
+      const splitFile = join(dataRoot, "datasets", `${splitName}.txt`);
+      const content = await readTextIfExists(splitFile);
+      if (!content) continue;
+      const normalized = splitName === "test_normal" || splitName === "test_challenge" ? "test" : splitName;
+      for (const line of content.split("\n")) {
+        const id = line.trim();
+        if (id) splitByTaskId.set(id, normalized);
+      }
+    }
 
     for (const taskId of taskIds) {
       const taskRoot = join(rawRoot, "tasks", taskId);
@@ -346,7 +477,7 @@ export class AppWorldAdapter implements DatasetAdapter {
         taskId,
         source: this.source,
         domain: domains,
-        split: split as "train" | "dev" | "test",
+        split: splitByTaskId.get(taskId) ?? (manifestSplit as "train" | "dev" | "test"),
         query: specs.instruction,
         oracleIntent: inferOracleIntent(specs, publicData),
         memoryPool,
