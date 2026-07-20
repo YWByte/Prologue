@@ -27,8 +27,10 @@ export type AppWorldExecutorConfig = {
   llmModel?: string;
   /** Enable Qwen3.5 thinking mode. Default false. */
   enableThinking?: boolean;
-  /** Max agent steps. Default 40. */
+  /** Max agent steps. Default 200. */
   maxSteps?: number;
+  /** Max tokens for LLM response. Default 1024. */
+  maxTokens?: number;
 };
 
 const DEFAULT_CONFIG: Omit<AppWorldExecutorConfig, "appworldRoot" | "pythonPath" | "pythonScriptsDir"> = {
@@ -134,6 +136,7 @@ export class AppWorldExecutor implements Executor {
           toolExecutor,
           input,
           maxSteps: this.config.maxSteps,
+          maxTokens: this.config.maxTokens,
           enableThinking: this.config.enableThinking,
         });
         const agentResult = await agent.run();

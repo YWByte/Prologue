@@ -132,10 +132,10 @@ T = T* + T_distractor
 
 数据：
 
-- **τ³-bench**：由用户目标和工具轨迹构造 `I* / T*`，加入同域工具干扰
-- **AppWorld**：由任务说明、app state、用户活动和 API 轨迹构造 `I* / M* / T*`，作为三组件归因主数据
-- **MemoryAgentBench / MemBench**：混合 gold memory、同主题干扰、过期记忆和冲突记忆，分析 memory selection failure
-- **BFCL V4**：混合 gold functions、相似函数和冗余函数，分析 tool selection failure
+- **BFCL V4 (Memory track)**：由多轮用户对话、memory snapshot 和 memory operation APIs 构造 `I* / M* / T*`，作为三组件归因**首选主数据集**。其三组件在数据结构上天然分离（I=问题+场景、M=前置对话内容、T=记忆 API 子集），扣留任一组件不污染其余，归因信号最干净；执行链条短（调几次记忆 API → 拼答案），失败更可能来自 pre-execution context 不足而非执行错误，与 Prologue 论文理念最契合；三种 memory backend (KV/Vector/Summarization) 提供同题不同条件的天然控制变量
+- **AppWorld**：由任务说明、app state、用户活动和 API 轨迹构造 `I* / M* / T*`，作为**对照数据集**。其执行链条长、状态空间大，失败中执行错误占比较高，用于验证归因方法在执行负担重的任务上仍成立（robustness check）
+- **τ²-bench**：由用户目标和工具轨迹构造 `I* / T*`，加入同域工具干扰（注：原 τ³-bench 仍 WIP，采用稳定的 τ²-bench），作为多轮对话场景的补充
+- **MemoryAgentBench / MemBench**：混合 gold memory、同主题干扰、过期记忆和冲突记忆，分析 memory selection failure（单组件深挖，作为补充）
 
 设置：
 
@@ -152,8 +152,9 @@ T = T* + T_distractor
 
 数据：
 
-- **τ³-bench**：测试多轮澄清和工具调用
-- **AppWorld**：测试状态化 API、记忆选择和工具选择
+- **BFCL V4 (Memory track)**：测试 memory-operation tool 调用、用户意图演化与 memory state 管理（主数据集）
+- **AppWorld**：测试状态化 API、记忆选择和工具选择（对照数据集，验证执行重任务上的归因鲁棒性）
+- **τ²-bench**：测试多轮澄清和工具调用
 - **MemoryAgentBench / MemBench**：测试 memory-heavy 场景
 
 方法只访问 `x, M, T`。`M` 和 `T` 包含真实项与干扰项，`I*, M*, T*` 不进入方法输入。
@@ -176,7 +177,7 @@ Baselines：
 
 数据：
 
-- 来自 **τ³-bench / AppWorld / MemoryAgentBench / MemBench** 的执行轨迹
+- 来自 **BFCL V4 / AppWorld / τ²-bench / MemoryAgentBench / MemBench** 的执行轨迹（BFCL V4 为主）
 - 每个任务构造多个 `z = (i, m, t)`，执行后得到 `y_success`
 - 通过 oracle 替换得到 `y_missing`
 - 按 task id 划分 train / dev / test，避免同任务泄漏
@@ -265,7 +266,8 @@ score ≥ τ → 冻结初始上下文并执行
 
 数据：
 
-- **BFCL V4**：工具库规模和函数调用泛化
+- **BFCL V4 (Memory track)**：memory backend 切换（KV/Vector/Summarization）和工具库规模泛化（主数据集，提供同题跨 backend 控制变量）
+- **AppWorld**：跨 app 域和工具库规模泛化（对照数据集）
 - **BrowserGym / WorkArena / BrowseComp**：web-agent 和企业流程泛化
 - **Terminal-Bench 2.0 / SWE-Lancer**：coding / terminal 泛化
 

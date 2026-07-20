@@ -3,6 +3,7 @@
 import { dirname, join, isAbsolute } from "node:path";
 import { mkdir, stat } from "node:fs/promises";
 import { AppWorldAdapter, buildDatasetManifest, readCanonicalTasks, writeCanonicalTasks, writeDatasetManifest } from "@prologue/data";
+import type { CanonicalTask } from "@prologue/schemas";
 import { AppWorldExecutor, makeAppWorldExecutorConfig, runRq1Mock, runRq1Real } from "@prologue/experiments";
 import { createClientFromEnv, loadEnvIntoProcess } from "@prologue/common";
 import { Session } from "@prologue/session";
@@ -242,13 +243,23 @@ async function buildData(args: Args): Promise<void> {
 
   try {
     await session.logger.info("adapter_start", { source, rawRoot });
-    const count = await writeCanonicalTasks(adapter.convert(rawRoot), outPath);
+    const tasks: CanonicalTask[] = [];
+    const count = await writeCanonicalTasks((async function* () {
+      for await (const task of adapter.convert(rawRoot)) {
+        tasks.push(task);
+        yield task;
+      }
+    })(), outPath);
+    const splits: Record<string, number> = {};
+    for (const task of tasks) {
+      splits[task.split] = (splits[task.split] ?? 0) + 1;
+    }
     const manifest = buildDatasetManifest({
       suiteVersion: "0.1.0",
       schemaVersion: "0.1.0",
       sources: [source],
       taskCount: count,
-      splits: { dev: count },
+      splits,
       adapterVersions: { [source]: adapter.version },
       metadata: { outPath },
     });

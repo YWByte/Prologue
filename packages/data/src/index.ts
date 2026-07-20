@@ -57,3 +57,4 @@ export function buildDatasetManifest(input: {
 }
 
 export { AppWorldAdapter } from "./adapters/appworld.js";
+export { BfclV4MemoryAdapter } from "./adapters/bfcl_v4_memory.js";

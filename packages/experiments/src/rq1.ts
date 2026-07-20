@@ -26,6 +26,7 @@ export type Rq1ExperimentInput = {
   usesOracleIntent: boolean;
   usesOracleMemory: boolean;
   usesOracleTool: boolean;
+  evaluatorMetadata?: Record<string, unknown>;
 };
 
 export type Rq1MockSummary = {
@@ -108,6 +109,7 @@ export function buildRq1Input(task: CanonicalTask, condition: Rq1Condition): Rq1
     usesOracleIntent,
     usesOracleMemory,
     usesOracleTool,
+    evaluatorMetadata: task.evaluator?.metadata,
   };
 }
 

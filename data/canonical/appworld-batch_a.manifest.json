@@ -1,0 +1,19 @@
+{
+  "suiteVersion": "0.1.0",
+  "schemaVersion": "0.1.0",
+  "createdAt": "2026-07-19T14:40:33.279Z",
+  "sources": [
+    "appworld"
+  ],
+  "taskCount": 147,
+  "splits": {
+    "train": 90,
+    "dev": 57
+  },
+  "adapterVersions": {
+    "appworld": "0.2.0"
+  },
+  "metadata": {
+    "outPath": "/Users/wondery/paper/Prologue/data/canonical/appworld-batch_a.jsonl"
+  }
+}

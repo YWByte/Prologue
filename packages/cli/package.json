@@ -16,6 +16,7 @@
     "@prologue/common": "workspace:*",
     "@prologue/data": "workspace:*",
     "@prologue/experiments": "workspace:*",
+    "@prologue/schemas": "workspace:*",
     "@prologue/session": "workspace:*"
   }
 }

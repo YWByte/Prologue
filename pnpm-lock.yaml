@@ -32,6 +32,9 @@ importers:
       '@prologue/experiments':
         specifier: workspace:*
         version: link:../experiments
+      '@prologue/schemas':
+        specifier: workspace:*
+        version: link:../schemas
       '@prologue/session':
         specifier: workspace:*
         version: link:../session

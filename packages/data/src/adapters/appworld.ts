@@ -547,10 +547,14 @@ export class AppWorldAdapter implements DatasetAdapter {
   readonly version = "0.2.0";
 
   async *convert(rawRoot: string): AsyncIterable<CanonicalTask> {
-    const manifest = await readJsonIfExists<{ split?: string; taskIds?: string[] }>(join(rawRoot, "sample-manifest.json"), {});
+    const manifest = await readJsonIfExists<{ split?: string; taskIds?: string[]; root?: string }>(join(rawRoot, "sample-manifest.json"), {});
+    // If manifest specifies a `root`, use it as the actual task data root.
+    // This allows manifest-only directories (e.g. data/raw/appworld/batch_a/)
+    // to point at the shared task data (e.g. data/raw/appworld/data/).
+    const taskDataRoot = typeof manifest.root === "string" && manifest.root.length > 0 ? manifest.root : rawRoot;
     const manifestSplit = manifest.split ?? "dev";
-    const taskIds = manifest.taskIds ?? (await readFile(join(rawRoot, "datasets", `${manifestSplit}.txt`), "utf8")).split("\n").filter(Boolean);
-    const dataRoot = rawRoot.endsWith("sample") || rawRoot.endsWith("sample_5") ? join(rawRoot, "..", "data") : rawRoot;
+    const taskIds = manifest.taskIds ?? (await readFile(join(taskDataRoot, "datasets", `${manifestSplit}.txt`), "utf8")).split("\n").filter(Boolean);
+    const dataRoot = taskDataRoot.endsWith("sample") || taskDataRoot.endsWith("sample_5") ? join(taskDataRoot, "..", "data") : taskDataRoot;
     const apiDocsRoot = join(dataRoot, "api_docs");
 
     // Build taskId -> actual split map from datasets/*.txt
@@ -567,7 +571,7 @@ export class AppWorldAdapter implements DatasetAdapter {
     }
 
     for (const taskId of taskIds) {
-      const taskRoot = join(rawRoot, "tasks", taskId);
+      const taskRoot = join(taskDataRoot, "tasks", taskId);
       const specs = await readJson<AppWorldSpecs>(join(taskRoot, "specs.json"));
       const requiredApps = await readJsonIfExists<string[]>(join(taskRoot, "ground_truth", "required_apps.json"), []);
       const apiCalls = await readJsonIfExists<ApiCall[]>(join(taskRoot, "ground_truth", "api_calls.json"), []);

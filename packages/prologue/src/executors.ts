@@ -20,6 +20,15 @@ export type ExecutorInput = {
   usesOracleIntent?: boolean;
   usesOracleMemory?: boolean;
   usesOracleTool?: boolean;
+  /**
+   * Task-level evaluator metadata (from CanonicalTask.evaluator.metadata).
+   * Available in all conditions — unlike oracle memory item metadata, which
+   * only enters input.memory when usesOracleMemory is true. Executors that
+   * need gold answers for evaluation should read from here, NOT from oracle
+   * memory item metadata, to avoid false negatives in baseline conditions
+   * where the agent may answer correctly via tool retrieval.
+   */
+  evaluatorMetadata?: Record<string, unknown>;
 };
 
 /**

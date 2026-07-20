@@ -23,3 +23,15 @@ export {
   makeAppWorldExecutorConfig,
   type AppWorldExecutorConfig,
 } from "./executors/appworld.js";
+
+export {
+  BfclV4MemoryExecutor,
+  makeBfclExecutorConfig,
+  type BfclV4ExecutorConfig,
+} from "./executors/bfcl_v4_memory.js";
+export { StubBfclMemoryAgent, type StubBfclAgentResult } from "./executors/bfcl_v4_stub_agent.js";
+export {
+  LlmBfclMemoryAgent,
+  type BfclLlmAgentConfig,
+  type BfclLlmAgentResult,
+} from "./executors/bfcl_v4_llm_agent.js";

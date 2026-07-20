@@ -38,6 +38,7 @@ export {
   OpenAiCompatibleClient,
   type ProviderConfig,
   type SiliconFlowConfig,
+  LlmCallError,
   createSiliconFlowClient,
   createSiliconFlowClientFromEnv,
   createClient,

@@ -10,6 +10,7 @@ export type LlmAgentConfig = {
   toolExecutor: AppWorldToolExecutor;
   input: ExecutorInput;
   maxSteps?: number;
+  maxTokens?: number;
   enableThinking?: boolean;
 };
 
@@ -21,7 +22,8 @@ type ToolCallRequest = {
   answer: string;
 };
 
-const DEFAULT_MAX_STEPS = 40;
+const DEFAULT_MAX_STEPS = 200;
+const DEFAULT_MAX_TOKENS = 1024;
 
 function now(): string {
   return new Date().toISOString();
@@ -68,18 +70,22 @@ function buildSystemPrompt(tools: ToolItem[]): string {
     "Available tools:",
     toolList,
     "",
-    "Response format:",
-    "To call a tool, respond with EXACTLY one line in this format:",
+    "Response format (STRICT):",
+    "- Each response MUST be EXACTLY one line, starting with TOOL_CALL or COMPLETE.",
+    "- No explanation, no reasoning, no markdown, no multi-line output before the command.",
+    "- If you want to think, do it silently; only output the final command line.",
+    "",
+    "To call a tool:",
     "TOOL_CALL <tool_id> <json_args>",
     "Example: TOOL_CALL supervisor__show_profile {}",
     "Example: TOOL_CALL spotify__show_song_library {\"page_limit\": 20}",
     "",
-    "When you have the final answer, respond with:",
+    "To return the final answer:",
     "COMPLETE <answer>",
     "Example: COMPLETE Mysteries of the Silent Sea,Crimson Veil",
     "",
     "Rules:",
-    "- Respond with ONLY one TOOL_CALL or COMPLETE line. No explanation, no markdown.",
+    "- ALWAYS start your response with TOOL_CALL or COMPLETE. Never start with any other text.",
     "- For app tasks that require authentication, login to each required app first using the user's email/username and the app password from context memory.",
     "- App passwords are in context memory under auth_account_passwords.",
     "- After login, the system automatically injects the correct app access token. Do not manually pass access_token unless a tool explicitly asks for it.",
@@ -222,6 +228,7 @@ export class LlmAppWorldAgent {
   constructor(config: LlmAgentConfig) {
     this.config = {
       maxSteps: DEFAULT_MAX_STEPS,
+      maxTokens: DEFAULT_MAX_TOKENS,
       enableThinking: false,
       ...config,
     };
@@ -248,7 +255,7 @@ export class LlmAppWorldAgent {
         messages,
         enableThinking: this.config.enableThinking,
         temperature: 0.3,
-        maxTokens: 1024,
+        maxTokens: this.config.maxTokens,
       });
 
       steps.push(makeLlmStep(messages, llmResponse.content));

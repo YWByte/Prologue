@@ -1,5 +1,62 @@
 # Changelog
 
+## 2026-07-20
+
+> 工程修复让 oracle 信号在 10-task smoke 上稳定为正；新增 BFCL V4 Memory adapter 与 executor；准备 A-train 90×8=720 runs 全量实验。
+
+### AppWorld LLM agent 工程修复
+- `DEFAULT_MAX_STEPS` 40 → 200；`maxTokens` 从硬编码 1024 改为可配置（`LlmAgentConfig.maxTokens`），由 `AppWorldExecutorConfig` 透传。
+- `appworld.ts` 注释与默认值同步（Default 200）。
+- 强化 system prompt：要求每条响应必须以 `TOOL_CALL` 或 `COMPLETE` 起始，禁止自然语言前置；"想思考就静默思考，只输出最终命令行"。
+- `LlmAppWorldAgent` 接收并使用 `this.config.maxTokens`（原硬编码 1024）。
+
+### Provider 错误分类（`packages/common/src/providers/openai-compatible.ts`）
+- 新增 `LlmCallError`：`permanent: boolean` + `httpStatus` + `errorCode`。
+- `PERMANENT_ERROR_CODES`（`insufficient_quota` / `invalid_api_key` / `model_not_found` / `context_length_exceeded` 等）和 `TRANSIENT_RATE_LIMIT_CODES`（`rate_limit_exceeded` / `tpm_limit_exceeded` 等）分类 429 响应。
+- 429 重试仍为 3 次指数退避（最长 90s）；permanent 错误直接抛出。
+- 当前 agent 未捕获 `LlmCallError`（generic Error 冒泡至 `appworld.ts` catch 块标记为 `executor_error`），保留接口供后续 circuit-breaker 使用。
+
+### AppWorld adapter 配置灵活性
+- `sample-manifest.json` 支持 `root` 字段，允许 manifest-only 目录（如 `batch_a/`）指向共享 task 数据目录。
+- 适配 `batch_a` / `batch_a_train` 等 manifest-only 装载方式。
+
+### ExecutorInput 新增 `evaluatorMetadata`
+- `packages/prologue/src/executors.ts`：`ExecutorInput` 新增 `evaluatorMetadata`（来自 `CanonicalTask.evaluator.metadata`）。
+- `packages/experiments/src/rq1.ts`：`buildRq1Input` 透传 `task.evaluator?.metadata`。
+- 与 oracle memory item metadata 区分：所有 condition 都能拿到，避免 baseline 误判。
+
+### CLI manifest 改进
+- `pnpm cli data:build` 收集每个 task 的 `split` 字段写入 `DatasetManifest.splits`（原来一律写 `{ dev: count }`）。
+
+### BFCL V4 Memory adapter（v0.1.0，`packages/data/src/adapters/bfcl_v4_memory.ts`）
+- 输入：`BFCL_v4_memory.json`（155 questions）× 3 backends（KV / Vector / Summarization）= 465 tasks。
+- 三层 memory：common（scenario profile）/ oracle（prereq 对话内容）/ distractor（其他 scenario 对话）。
+- `oracleToolIds` = retrieve / search / list_keys 子集 + `*_retrieve_all`（baseline 必须瞎猜 key，oracle 给 `retrieve_all` 提示）。
+- `oracleIntent` = question + scenario + topic chain + 验证源片段。
+- evaluator：`exact_match`，`goldAnswer` 含 ground truth 候选列表。
+- `supportsInteraction: false`（单轮：问题 → 答案）。
+
+### BFCL V4 executor 三件套
+- `packages/experiments/src/executors/bfcl_v4_memory.ts`：`BfclV4MemoryExecutor`，单轮调用 agent 后比对答案。
+- `bfcl_v4_llm_agent.ts`：`LlmBfclMemoryAgent`，调用 LLM 通过 memory API 函数检索并拼答案。
+- `bfcl_v4_stub_agent.ts`：`StubBfclMemoryAgent`，无 LLM，仅当 `usesOracleMemory===true` 时给出正确答案，跑固定 7-call 序列保 trajectory 完整。
+- 通过 `@prologue/experiments/src/index.ts` 导出。
+
+### Scripts
+- 新增 `scripts/test-bfcl-llm-oracle-all.ts`：BFCL V4 主实验脚本（465 tasks × 8 conditions）。
+- 新增 `scripts/test-bfcl-adapter.ts`：BFCL adapter 结构验证（53/53 checks passed）。
+- 新增 `scripts/test-bfcl-stub-attribution.ts`：stub agent 8-condition 归因矩阵验证（8/8 checks passed）。
+- `scripts/test-llm-oracle-all.ts`：maxSteps 60 → 800，maxTokens 4096 → 8192（覆盖 ground truth max ~498 步）。
+
+### 10-task smoke 验证（qwen3.5-27b，maxSteps=600）
+- baseline avg=0.76 / oracle_all avg=0.83，Δ=+0.08。
+- 6/10 任务 Δ=0（任务饱和或难度不足），2 个任务贡献主要正信号（b0a8eae_1 +0.20，e3d6c94_3 +0.56）。
+- maxSteps=600 有效覆盖复杂任务（34d9492_2 跑满 177 步；82e2fac_1 跑 141 步均成功）。
+
+### 仓库清理
+- `.gitignore` 加入 `data/canonical/*.jsonl`（adapter 产物由 `pnpm cli data:build` 重新生成）。
+- 删除一次性 smoke 脚本：`test-llm-122b-sample.ts` / `test-llm-deepseek-sample.ts` / `test-llm-model-compare.ts` / `_probe_tpm.mts`。
+
 ## 2026-07-19（下半场）
 
 > 修复 RQ1 oracle 工程构造问题，使 oracle 信息符合论文理念；5×8=40 run 矩阵在 qwen3.5-27b 和 qwen3.5-35b-a3b 上均给出正向归因信号。
