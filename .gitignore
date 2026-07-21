@@ -5,5 +5,4 @@ dist/
 *.log
 .venv-appworld/
 data/raw/
-runs/*
-!runs/*a_train*/
+runs/
