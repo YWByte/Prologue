@@ -53,8 +53,11 @@ const CONFIG = {
   maxTokens: 8192,
   rpm: 1000,
   apiMaxConcurrency: 50,
-  runConcurrency: 20,
+  runConcurrency: 10,
   checkpointEvery: 50,
+  // If set, load valid (non-executor_error) results from this session dir as "already completed",
+  // and rerun all executor_error runs in a NEW session. Leave empty for fresh run.
+  resumeValidFrom: "runs/2026-07-20T11-05-16-754Z_rq1_oracle_attribution_llm_a_train_c355edbd",
 };
 
 function configHash(): string {
@@ -143,22 +146,25 @@ async function main(): Promise<void> {
   const workspaceRoot = process.cwd();
   const runsRoot = join(workspaceRoot, "runs");
 
-  // Try to resume from a previous checkpoint
-  const resumable = await findResumableSession(runsRoot);
+  // Resume logic: prefer `resumeValidFrom` (load only non-error results into a NEW session),
+  // otherwise fall back to `findResumableSession` (in-place continuation).
   let session: Session;
   let results: RunResult[] = [];
   let resumedRunDir: string | null = null;
 
-  if (resumable) {
-    const cp = (await loadCheckpoint(resumable))!;
-    results = cp.completed;
-    resumedRunDir = resumable;
-    console.log(`resuming from ${resumable}, ${results.length} runs already completed`);
-    // Re-create session object pointing to existing dir
+  if (CONFIG.resumeValidFrom) {
+    const cp = await loadCheckpoint(CONFIG.resumeValidFrom);
+    if (cp) {
+      const valid = cp.completed.filter((r) => !r.executorError);
+      const errors = cp.completed.filter((r) => r.executorError);
+      results = valid;
+      console.log(`resumeValidFrom: ${CONFIG.resumeValidFrom}`);
+      console.log(`  valid (skip): ${valid.length}, executor_error (rerun): ${errors.length}`);
+    }
     session = await Session.start({
       rq: "rq1",
       method: "oracle_attribution_llm_a_train",
-      config: { ...CONFIG, resumed: true, resumedFrom: resumable },
+      config: { ...CONFIG, resumedFrom: CONFIG.resumeValidFrom },
       dataset: {
         taskCount: tasks.length,
         sources: Array.from(new Set(tasks.map((t) => t.source))),
@@ -171,26 +177,50 @@ async function main(): Promise<void> {
       },
       runsRoot,
     });
-    // Use the resumed run dir for the new session too, so checkpoints keep overwriting
     resumedRunDir = session.runDir;
   } else {
-    session = await Session.start({
-      rq: "rq1",
-      method: "oracle_attribution_llm_a_train",
-      config: CONFIG,
-      dataset: {
-        taskCount: tasks.length,
-        sources: Array.from(new Set(tasks.map((t) => t.source))),
-      },
-      models: {
-        executor: "appworld_llm",
-        agent: "llm_react",
-        llmProvider: CONFIG.llmProvider,
-        llmModel: CONFIG.llmModel,
-      },
-      runsRoot,
-    });
-    resumedRunDir = session.runDir;
+    const resumable = await findResumableSession(runsRoot);
+    if (resumable) {
+      const cp = (await loadCheckpoint(resumable))!;
+      results = cp.completed;
+      resumedRunDir = resumable;
+      console.log(`resuming from ${resumable}, ${results.length} runs already completed`);
+      session = await Session.start({
+        rq: "rq1",
+        method: "oracle_attribution_llm_a_train",
+        config: { ...CONFIG, resumed: true, resumedFrom: resumable },
+        dataset: {
+          taskCount: tasks.length,
+          sources: Array.from(new Set(tasks.map((t) => t.source))),
+        },
+        models: {
+          executor: "appworld_llm",
+          agent: "llm_react",
+          llmProvider: CONFIG.llmProvider,
+          llmModel: CONFIG.llmModel,
+        },
+        runsRoot,
+      });
+      resumedRunDir = session.runDir;
+    } else {
+      session = await Session.start({
+        rq: "rq1",
+        method: "oracle_attribution_llm_a_train",
+        config: CONFIG,
+        dataset: {
+          taskCount: tasks.length,
+          sources: Array.from(new Set(tasks.map((t) => t.source))),
+        },
+        models: {
+          executor: "appworld_llm",
+          agent: "llm_react",
+          llmProvider: CONFIG.llmProvider,
+          llmModel: CONFIG.llmModel,
+        },
+        runsRoot,
+      });
+      resumedRunDir = session.runDir;
+    }
   }
 
   const llm = createClientFromEnv(CONFIG.llmProvider, {

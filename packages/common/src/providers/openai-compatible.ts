@@ -33,7 +33,6 @@ export class LlmCallError extends Error {
  * Sources: OpenAI / Dashscope / SiliconFlow error conventions.
  */
 const PERMANENT_ERROR_CODES = new Set([
-  "insufficient_quota",
   "invalid_api_key",
   "invalid_auth",
   "account_deactivated",
@@ -53,6 +52,8 @@ const TRANSIENT_RATE_LIMIT_CODES = new Set([
   "request_limit_exceeded",
   "tpm_limit_exceeded",
   "rpm_limit_exceeded",
+  "limit_burst_rate",
+  "insufficient_quota",
 ]);
 
 /**

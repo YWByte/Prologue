@@ -35,7 +35,7 @@ export type AppWorldExecutorConfig = {
 
 const DEFAULT_CONFIG: Omit<AppWorldExecutorConfig, "appworldRoot" | "pythonPath" | "pythonScriptsDir"> = {
   basePort: 9000,
-  serverReadyTimeoutMs: 30_000,
+  serverReadyTimeoutMs: 60_000,
   serverReadyPollMs: 500,
   serverShutdownTimeoutMs: 15_000,
   evalTimeoutMs: 120_000,
