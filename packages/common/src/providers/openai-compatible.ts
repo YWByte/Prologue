@@ -240,7 +240,14 @@ export class OpenAiCompatibleClient implements LlmClient {
       temperature: input.temperature ?? this.config.defaultTemperature,
       max_tokens: input.maxTokens ?? this.config.defaultMaxTokens,
       ...(input.stop ? { stop: input.stop } : {}),
-      ...(input.enableThinking !== undefined ? { enable_thinking: input.enableThinking } : {}),
+      ...(input.enableThinking !== undefined
+        ? {
+            enable_thinking: input.enableThinking,
+            // vLLM expects enable_thinking nested under chat_template_kwargs;
+            // DashScope uses the top-level field. Send both for compatibility.
+            chat_template_kwargs: { enable_thinking: input.enableThinking },
+          }
+        : {}),
     };
 
     let lastError: LlmCallError | undefined;

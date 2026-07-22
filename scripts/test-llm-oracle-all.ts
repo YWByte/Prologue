@@ -44,20 +44,21 @@ type Checkpoint = {
 loadEnvIntoProcess();
 
 const CONFIG = {
-  tasksPath: "data/canonical/appworld-batch_a_train.jsonl",
+  tasksPath: "data/canonical/appworld-batch_a.jsonl",
   appworldRoot: process.env.PROLOGUE_APPWORLD_ROOT ?? "data/raw/appworld",
-  rawManifest: "data/raw/appworld/batch_a_train",
+  rawManifest: "data/raw/appworld/batch_a",
   pythonPath: process.env.PROLOGUE_APPWORLD_PYTHON ?? ".venv-appworld/bin/python",
   basePort: 9100,
   experimentNamePrefix: "prologue_rq1_a_train",
-  llmProvider: "dashscope",
+  llmProvider: "vllm",
   llmModel: "qwen3.5-27b",
   enableThinking: false,
   maxSteps: 800,
-  maxTokens: 8192,
+  maxTokens: 2048,
   rpm: 1000,
   apiMaxConcurrency: 50,
   runConcurrency: 10,
+  llmTimeoutMs: 600_000,
   checkpointEvery: 50,
   // If set, load valid (non-executor_error) results from this session dir as "already completed",
   // and rerun all executor_error runs in a NEW session. Leave empty for fresh run.
@@ -65,7 +66,25 @@ const CONFIG = {
 };
 
 function configHash(): string {
-  return [CONFIG.llmModel, CONFIG.maxSteps, CONFIG.maxTokens, CONFIG.rpm, CONFIG.runConcurrency].join("|");
+  // NOTE: maxTokens intentionally excluded — token limit changes should not
+  // invalidate previously-completed valid runs.
+  return [CONFIG.llmModel, CONFIG.maxSteps, CONFIG.rpm, CONFIG.runConcurrency].join("|");
+}
+
+/**
+ * Match a checkpoint's configHash against the current config, tolerating the
+ * legacy 5-field format (llmModel|maxSteps|maxTokens|rpm|runConcurrency) by
+ * dropping the maxTokens field before comparison.
+ */
+function matchesConfigHash(cpHash: string): boolean {
+  const current = configHash();
+  if (cpHash === current) return true;
+  const parts = cpHash.split("|");
+  if (parts.length === 5) {
+    // Legacy: llmModel|maxSteps|maxTokens|rpm|runConcurrency → drop index 2
+    return [parts[0], parts[1], parts[3], parts[4]].join("|") === current;
+  }
+  return false;
 }
 
 function checkpointPath(runDir: string): string {
@@ -87,11 +106,53 @@ async function saveCheckpoint(runDir: string, cp: Checkpoint): Promise<void> {
   await writeFile(checkpointPath(runDir), JSON.stringify(cp), "utf8");
 }
 
-async function findResumableSession(runsRoot: string): Promise<string | null> {
+/**
+ * Reconstruct RunResult[] from log.jsonl when a session has no checkpoint.json
+ * yet (e.g. crashed before the first checkpointEvery threshold).
+ */
+async function loadValidFromLog(runDir: string): Promise<RunResult[]> {
+  const logPath = join(runDir, "log.jsonl");
+  if (!existsSync(logPath)) return [];
+  const content = await readFile(logPath, "utf8");
+  const results: RunResult[] = [];
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      if (!["eval_result", "provider_error", "executor_error"].includes(event.type)) continue;
+      const p = event.payload;
+      if (!p?.condition) continue;
+      results.push({
+        taskId: event.taskId,
+        condition: p.condition,
+        success: p.success ?? false,
+        score: p.score ?? 0,
+        steps: p.steps ?? 0,
+        durationMs: p.durationMs ?? 0,
+        executorError: p.executorError ?? event.type === "executor_error",
+        providerError: p.providerError ?? event.type === "provider_error",
+      });
+    } catch {
+      // skip unparseable line
+    }
+  }
+  return results;
+}
+
+/**
+ * Load only valid (non-error) RunResults from a session directory.
+ * Prefers checkpoint.json; falls back to log.jsonl reconstruction.
+ */
+async function loadValidResults(runDir: string): Promise<RunResult[]> {
+  const cp = await loadCheckpoint(runDir);
+  const all = cp ? cp.completed : await loadValidFromLog(runDir);
+  return all.filter((r) => !r.executorError && !r.providerError);
+}
+
+async function findResumableSession(runsRoot: string, totalRuns: number): Promise<string | null> {
   // Look for the most recent session dir that has a checkpoint with matching config.
   try {
-    const entries = await readFile(join(runsRoot, "..", "runs"), "utf8").catch(() => "");
-    // Instead, scan runs/ directory directly
     const { readdir } = await import("node:fs/promises");
     const dirs = (await readdir(runsRoot))
       .filter((d) => d.includes("rq1_oracle_attribution_llm_a_train"))
@@ -99,7 +160,7 @@ async function findResumableSession(runsRoot: string): Promise<string | null> {
       .reverse();
     for (const d of dirs) {
       const cp = await loadCheckpoint(join(runsRoot, d));
-      if (cp && cp.configHash === configHash() && cp.completed.length < 720) {
+      if (cp && matchesConfigHash(cp.configHash) && cp.completed.length < totalRuns) {
         return join(runsRoot, d);
       }
     }
@@ -107,6 +168,31 @@ async function findResumableSession(runsRoot: string): Promise<string | null> {
     // ignore
   }
   return null;
+}
+
+/**
+ * Find ALL session dirs with run data (log.jsonl or checkpoint.json),
+ * excluding a specific path. Returns paths in ascending order (oldest first)
+ * so callers can merge with newer sessions overriding older ones.
+ * Does NOT check configHash — used for merging valid results across sessions.
+ */
+async function findRecentSessionsForMerge(
+  runsRoot: string,
+  exclude?: string,
+): Promise<string[]> {
+  const { readdir } = await import("node:fs/promises");
+  const dirs = (await readdir(runsRoot))
+    .filter((d) => d.includes("rq1_oracle_attribution_llm_a_train"))
+    .sort(); // ascending: oldest first, newest last (newest overrides)
+  const result: string[] = [];
+  for (const d of dirs) {
+    const full = join(runsRoot, d);
+    if (exclude && full === exclude) continue;
+    if (existsSync(join(full, "log.jsonl")) || existsSync(join(full, "checkpoint.json"))) {
+      result.push(full);
+    }
+  }
+  return result;
 }
 
 async function buildCanonicalIfMissing(): Promise<void> {
@@ -150,86 +236,75 @@ async function main(): Promise<void> {
   const workspaceRoot = process.cwd();
   const runsRoot = join(workspaceRoot, "runs");
 
-  // Resume logic: prefer `resumeValidFrom` (load only non-error results into a NEW session),
-  // otherwise fall back to `findResumableSession` (in-place continuation).
-  let session: Session;
-  let results: RunResult[] = [];
-  let resumedRunDir: string | null = null;
+  // Total runs = tasks × 8 conditions
+  const totalRuns = tasks.length * RQ1_CONDITIONS.length;
 
+  // Resume logic: merge valid results from up to two sources, then rerun all
+  // errors in a NEW session. maxTokens changes are tolerated (excluded from
+  // configHash); other config changes (llmModel/maxSteps/rpm/runConcurrency)
+  // still prevent findResumableSession from matching.
+  const validByKey = new Map<string, RunResult>();
+  let resumedFrom: string | undefined;
+
+  // Source 1: resumeValidFrom (e.g. c355edbd — historical valid baseline)
   if (CONFIG.resumeValidFrom) {
-    const cp = await loadCheckpoint(CONFIG.resumeValidFrom);
-    if (cp) {
-      const valid = cp.completed.filter((r) => !r.executorError && !r.providerError);
-      const errors = cp.completed.filter((r) => r.executorError || r.providerError);
-      results = valid;
-      console.log(`resumeValidFrom: ${CONFIG.resumeValidFrom}`);
-      console.log(`  valid (skip): ${valid.length}, rerun: ${errors.length} (executor_error: ${cp.completed.filter(r => r.executorError).length}, provider_error: ${cp.completed.filter(r => r.providerError).length})`);
+    const valid = await loadValidResults(CONFIG.resumeValidFrom);
+    for (const r of valid) validByKey.set(`${r.taskId}::${r.condition}`, r);
+    console.log(`resumeValidFrom: ${CONFIG.resumeValidFrom} -> ${valid.length} valid`);
+    resumedFrom = CONFIG.resumeValidFrom;
+  }
+
+  // Source 2: ALL sessions with run data (oldest→newest, newer overrides older).
+  // Merges valid results across multiple restarts so no valid run is lost.
+  const recentSessions = await findRecentSessionsForMerge(runsRoot, CONFIG.resumeValidFrom || undefined);
+  for (const sessionDir of recentSessions) {
+    const valid = await loadValidResults(sessionDir);
+    let added = 0;
+    for (const r of valid) {
+      const key = `${r.taskId}::${r.condition}`;
+      if (!validByKey.has(key)) added++;
+      validByKey.set(key, r); // newer session overrides older (processed last)
     }
-    session = await Session.start({
-      rq: "rq1",
-      method: "oracle_attribution_llm_a_train",
-      config: { ...CONFIG, resumedFrom: CONFIG.resumeValidFrom },
-      dataset: {
-        taskCount: tasks.length,
-        sources: Array.from(new Set(tasks.map((t) => t.source))),
-      },
-      models: {
-        executor: "appworld_llm",
-        agent: "llm_react",
-        llmProvider: CONFIG.llmProvider,
-        llmModel: CONFIG.llmModel,
-      },
-      runsRoot,
-    });
-    resumedRunDir = session.runDir;
-  } else {
-    const resumable = await findResumableSession(runsRoot);
+    console.log(`recent session: ${sessionDir} -> ${valid.length} valid (${added} new)`);
+    if (!resumedFrom) resumedFrom = sessionDir;
+  }
+
+  // Source 3 (fallback only): if neither source produced data, try checkpoint match.
+  if (validByKey.size === 0) {
+    const resumable = await findResumableSession(runsRoot, totalRuns);
     if (resumable) {
-      const cp = (await loadCheckpoint(resumable))!;
-      results = cp.completed;
-      resumedRunDir = resumable;
-      console.log(`resuming from ${resumable}, ${results.length} runs already completed`);
-      session = await Session.start({
-        rq: "rq1",
-        method: "oracle_attribution_llm_a_train",
-        config: { ...CONFIG, resumed: true, resumedFrom: resumable },
-        dataset: {
-          taskCount: tasks.length,
-          sources: Array.from(new Set(tasks.map((t) => t.source))),
-        },
-        models: {
-          executor: "appworld_llm",
-          agent: "llm_react",
-          llmProvider: CONFIG.llmProvider,
-          llmModel: CONFIG.llmModel,
-        },
-        runsRoot,
-      });
-      resumedRunDir = session.runDir;
-    } else {
-      session = await Session.start({
-        rq: "rq1",
-        method: "oracle_attribution_llm_a_train",
-        config: CONFIG,
-        dataset: {
-          taskCount: tasks.length,
-          sources: Array.from(new Set(tasks.map((t) => t.source))),
-        },
-        models: {
-          executor: "appworld_llm",
-          agent: "llm_react",
-          llmProvider: CONFIG.llmProvider,
-          llmModel: CONFIG.llmModel,
-        },
-        runsRoot,
-      });
-      resumedRunDir = session.runDir;
+      const valid = await loadValidResults(resumable);
+      for (const r of valid) validByKey.set(`${r.taskId}::${r.condition}`, r);
+      console.log(`resumable session: ${resumable} -> ${valid.length} valid`);
+      resumedFrom = resumable;
     }
   }
+
+  const results: RunResult[] = Array.from(validByKey.values());
+  console.log(`merged valid: ${results.length}/${totalRuns}, rerun: ${totalRuns - results.length}`);
+
+  const session = await Session.start({
+    rq: "rq1",
+    method: "oracle_attribution_llm_a_train",
+    config: { ...CONFIG, ...(resumedFrom ? { resumedFrom } : {}) },
+    dataset: {
+      taskCount: tasks.length,
+      sources: Array.from(new Set(tasks.map((t) => t.source))),
+    },
+    models: {
+      executor: "appworld_llm",
+      agent: "llm_react",
+      llmProvider: CONFIG.llmProvider,
+      llmModel: CONFIG.llmModel,
+    },
+    runsRoot,
+  });
+  const resumedRunDir: string = session.runDir;
 
   const llm = createClientFromEnv(CONFIG.llmProvider, {
     rpm: CONFIG.rpm,
     maxConcurrency: CONFIG.apiMaxConcurrency,
+    timeoutMs: CONFIG.llmTimeoutMs,
   });
 
   const executor = new AppWorldExecutor(
@@ -255,9 +330,9 @@ async function main(): Promise<void> {
       workItems.push({ task, condition, runIndex: ++runIndex });
     }
   }
-  const totalRuns = workItems.length;
+  // totalRuns already computed above (before resume logic)
 
-  // Skip already-completed runs (from checkpoint)
+  // Skip already-completed runs (from merged valid results)
   const completedKeys = new Set(results.map((r) => `${r.taskId}::${r.condition}`));
   let queueCursor = 0;
 
@@ -367,6 +442,7 @@ async function main(): Promise<void> {
         steps: 0,
         durationMs,
         executorError,
+        providerError: false,
       };
       results.push(runResult);
       completedKeys.add(key);
