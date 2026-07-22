@@ -141,7 +141,7 @@ flowchart LR
 
 | 脚本 | 行数 | 用途 |
 |---|---|---|
-| `test-llm-oracle-all.ts` | 443 | **主 RQ1 LLM 实验驱动器**。硬编码 `appworld-batch_a_train.jsonl` + `qwen3.5-27b`。自实现 worker pool（`runConcurrency: 20`）、checkpoint、断点续跑、汇总打印。90 tasks × 8 conditions = 720 runs |
+| `test-llm-oracle-all.ts` | 443 | **主 RQ1 LLM 实验驱动器**。硬编码 `appworld-batch_a_train.jsonl` + `qwen3.5-27b`。自实现 worker pool（`runConcurrency: 10`）、checkpoint、断点续跑、汇总打印。90 tasks × 8 conditions = 720 runs |
 | `test-bfcl-llm-oracle-all.ts` | - | BFCL V4 主实验驱动器。465 tasks × 8 conditions = 3720 runs |
 | `test-bfcl-adapter.ts` | - | BFCL adapter 结构验证（53 checks）|
 | `test-bfcl-stub-attribution.ts` | - | BFCL stub agent 8-condition 归因矩阵验证 |
@@ -151,7 +151,7 @@ flowchart LR
 **`test-llm-oracle-all.ts` 关键配置**：
 - `llmProvider: "dashscope"`, `llmModel: "qwen3.5-27b"`
 - `maxSteps: 800`, `maxTokens: 8192`, `enableThinking: false`
-- `rpm: 1000`, `apiMaxConcurrency: 50`, `runConcurrency: 20`
+- `rpm: 1000`, `apiMaxConcurrency: 50`, `runConcurrency: 10`
 - `basePort: 9100`, `checkpointEvery: 50`
 - 自动构建 canonical tasks（若缺失）
 - 可恢复：扫 `runs/` 找匹配 session，载 `checkpoint.json`，跳过已完成 `(taskId, condition)`；`configHash` 含 `llmModel|maxSteps|maxTokens|rpm|runConcurrency`
@@ -537,7 +537,7 @@ export interface ToolExecutor { call(tool, args): Promise<ToolCallResult>; }
 
 ### `AppWorldExecutor` — 单次执行生命周期
 
-**路径**：`packages/experiments/src/executors/appworld.ts`（238 行）
+**路径**：`packages/experiments/src/executors/appworld.ts`（237 行）
 
 ```mermaid
 sequenceDiagram
@@ -553,7 +553,7 @@ sequenceDiagram
     Exec->>Exec: 分配 port (basePort 轮转)
     Exec->>Exec: experimentName = prefix_taskId_condition<br/>(memory→mem 替换避免 AppWorld evaluator 坑)
     Exec->>Srv: start(python serve_apis.py)
-    Srv->>Srv: poll GET / until ready (30s)
+    Srv->>Srv: poll GET / until ready (60s)
     Exec->>Py: initAppWorldTask(mode=init)
     Py->>Py: _prepare_directories / _set_datetime / _save_state
     Exec->>Tool: new AppWorldToolExecutor(baseUrl)
@@ -594,7 +594,7 @@ sequenceDiagram
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `appworld.ts` | 238 | `AppWorldExecutor` 编排：port 分配 → server → init → agent → save → eval → stop |
+| `appworld.ts` | 237 | `AppWorldExecutor` 编排：port 分配 → server → init → agent → save → eval → stop |
 | `appworld_http.ts` | 154 | `AppWorldToolExecutor`：OpenAPI → fetch，per-app token 存储（`tokensByApp`），auth 注入 |
 | `appworld_server.ts` | 127 | `AppWorldServerManager`：管理 `python serve_apis.py` 子进程，poll `GET /` 就绪，SIGTERM 关闭 |
 | `appworld_python.ts` | 159 | `initAppWorldTask`（mode: init/save）+ `runAppWorldEval`，subprocess + stdin/stdout JSON |
@@ -701,9 +701,8 @@ Append-only JSONL logger，每行一个 `LogEvent`，写入 `<runDir>/log.jsonl`
 flowchart LR
     subgraph COMMON_PKG["@prologue/common"]
         ENV["env.ts<br/>loadEnvIntoProcess()"]
-        PROVIDERS["providers/index.ts<br/>4 个内置 provider"]
-        OAI_COMPAT["providers/openai-compatible.ts<br/>OpenAiCompatibleClient"]
-        SF["providers/siliconflow.ts<br/>工厂函数"]
+        PROVIDERS["providers/index.ts<br/>PROVIDERS 注册表 + createClientFromEnv()"]
+        OAI_COMPAT["providers/openai-compatible.ts<br/>OpenAiCompatibleClient<br/>(唯一客户端实现)"]
     end
 
     DOTENV[".env<br/>(DASHSCOPE_API_KEY 等)"]
@@ -711,10 +710,8 @@ flowchart LR
 
     DOTENV --> ENV
     ENV --> PROVIDERS
-    PROVIDERS --> OAI_COMPAT
-    PROVIDERS --> SF
+    PROVIDERS -->|"4 provider factory<br/>全部 new OpenAiCompatibleClient"| OAI_COMPAT
     OAI_COMPAT --> CALLER
-    SF --> CALLER
 ```
 
 **4 个内置 provider**：
@@ -731,6 +728,8 @@ flowchart LR
 - 重试：指数退避，HTTP 429 退避更长
 - `enable_thinking` 标志（Qwen 思考模式）
 - 默认：timeout 120s，3 次重试，RPM 500，并发 20
+- 错误分类：`PERMANENT_ERROR_CODES`（invalid_api_key 等，不重试）vs `TRANSIENT_RATE_LIMIT_CODES`（rate_limit_exceeded / limit_burst_rate / insufficient_quota 等，429 重试）
+- **关键修复（2026-07-21）**：`insufficient_quota` 从 `PERMANENT_ERROR_CODES` 移到 `TRANSIENT_RATE_LIMIT_CODES`。DashScope 用 `HTTP 429 + insufficient_quota` 表示临时 TPM 限制（应重试），不是永久配额耗尽。修复前并发 5+ 时 429 被误判为永久错误导致不重试、全部 EXECUTOR_ERROR
 - 导出接口：`LlmClient`（`call(input): Promise<LlmCallOutput>`）
 
 ## `runs/` — 实验产物
@@ -843,7 +842,7 @@ pnpm test            # 各包 vitest run --passWithNoTests
 | 5-task smoke run（qwen3.5-27b / 35b-a3b） | ✅ oracle_all > baseline（+0.14 / +0.10） |
 | 10-task smoke2（qwen3.5-27b，maxSteps=600 + STRICT prompt） | ✅ oracle_all 0.83 vs baseline 0.76（+0.08） |
 | BFCL V4 adapter + executor + 验证脚本 | ✅ 完成（53 结构检查 + 8 归因检查） |
-| A-train 全量 90×8=720 runs（qwen3.5-27b，maxSteps=800） | 🟡 进行中（session `c355edbd`，2026-07-20 启动） |
+| A-train 全量 90×8=720 runs（qwen3.5-27b，maxSteps=800） | 🟡 进行中（c355edbd 合并 286 valid + 434 error，续跑中） |
 | BFCL V4 RQ1 全量实验 | ❌ 未开始（adapter + executor 已就绪） |
 | RQ2 Prologue 方法 | ❌ 未开始 |
 | RQ3 训练式 Verifier | ❌ 未开始（接口已定义） |

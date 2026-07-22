@@ -37,10 +37,7 @@ export type EvalResult = {
 export {
   OpenAiCompatibleClient,
   type ProviderConfig,
-  type SiliconFlowConfig,
   LlmCallError,
-  createSiliconFlowClient,
-  createSiliconFlowClientFromEnv,
   createClient,
   createClientFromEnv,
   registerProvider,

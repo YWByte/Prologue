@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { LlmCallError } from "@prologue/common";
 import type { LlmClient } from "@prologue/common";
 import type { Executor, ExecutorInput, ExecutorResult } from "@prologue/prologue";
 import { AppWorldServerManager } from "./appworld_server.js";
@@ -210,8 +211,9 @@ export class AppWorldExecutor implements Executor {
       };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      steps.push(errorStep(`executor_error: ${message}`));
-      return fail(`executor_error: ${message}`, steps, metadata);
+      const prefix = e instanceof LlmCallError ? "provider_error" : "executor_error";
+      steps.push(errorStep(`${prefix}: ${message}`));
+      return fail(`${prefix}: ${message}`, steps, metadata);
     } finally {
       await server.stop();
     }

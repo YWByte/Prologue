@@ -30,6 +30,7 @@ type RunResult = {
   steps: number;
   durationMs: number;
   executorError: boolean;
+  providerError: boolean;
 };
 
 type Checkpoint = {
@@ -155,11 +156,11 @@ async function main(): Promise<void> {
   if (CONFIG.resumeValidFrom) {
     const cp = await loadCheckpoint(CONFIG.resumeValidFrom);
     if (cp) {
-      const valid = cp.completed.filter((r) => !r.executorError);
-      const errors = cp.completed.filter((r) => r.executorError);
+      const valid = cp.completed.filter((r) => !r.executorError && !r.providerError);
+      const errors = cp.completed.filter((r) => r.executorError || r.providerError);
       results = valid;
       console.log(`resumeValidFrom: ${CONFIG.resumeValidFrom}`);
-      console.log(`  valid (skip): ${valid.length}, executor_error (rerun): ${errors.length}`);
+      console.log(`  valid (skip): ${valid.length}, rerun: ${errors.length} (executor_error: ${cp.completed.filter(r => r.executorError).length}, provider_error: ${cp.completed.filter(r => r.providerError).length})`);
     }
     session = await Session.start({
       rq: "rq1",
@@ -277,11 +278,14 @@ async function main(): Promise<void> {
     );
 
     let executorError = false;
+    let providerError = false;
     try {
       const result = await executor.execute(input);
       const durationMs = Date.now() - startedAt;
       const stepCount = result.steps.length;
-      executorError = typeof result.reason === "string" && result.reason.startsWith("executor_error");
+      const reason = typeof result.reason === "string" ? result.reason : "";
+      executorError = reason.startsWith("executor_error");
+      providerError = reason.startsWith("provider_error");
 
       const runResult: RunResult = {
         taskId: task.taskId,
@@ -291,6 +295,7 @@ async function main(): Promise<void> {
         steps: stepCount,
         durationMs,
         executorError,
+        providerError,
       };
       results.push(runResult);
       completedKeys.add(key);
@@ -299,12 +304,13 @@ async function main(): Promise<void> {
         `[${runIndex}/${totalRuns}] DONE  task=${task.taskId} cond=${condition} ` +
           `success=${result.success} score=${result.score?.toFixed(2) ?? 0} ` +
           `steps=${stepCount} dur=${(durationMs / 1000).toFixed(1)}s` +
-          (executorError ? " [EXECUTOR_ERROR]" : ""),
+          (executorError ? " [EXECUTOR_ERROR]" : "") +
+          (providerError ? " [PROVIDER_ERROR]" : ""),
       );
 
       await session.logger.write({
-        level: executorError ? "error" : result.success ? "info" : "warn",
-        type: executorError ? "executor_error" : "eval_result",
+        level: executorError || providerError ? "error" : result.success ? "info" : "warn",
+        type: executorError ? "executor_error" : providerError ? "provider_error" : "eval_result",
         rq: "rq1",
         taskId: task.taskId,
         source: task.source,
@@ -316,6 +322,7 @@ async function main(): Promise<void> {
           steps: stepCount,
           durationMs,
           executorError,
+          providerError,
           experimentName: result.metadata?.experimentName,
           reason: result.reason,
         },
@@ -411,40 +418,44 @@ async function main(): Promise<void> {
   console.log("=== SUMMARY ===");
   console.log("=".repeat(80));
 
-  const byCondition: Record<string, { total: number; success: number; executorError: number }> = {};
+  const byCondition: Record<string, { total: number; success: number; executorError: number; providerError: number }> = {};
   for (const r of results) {
-    if (!byCondition[r.condition]) byCondition[r.condition] = { total: 0, success: 0, executorError: 0 };
+    if (!byCondition[r.condition]) byCondition[r.condition] = { total: 0, success: 0, executorError: 0, providerError: 0 };
     byCondition[r.condition].total += 1;
     if (r.success) byCondition[r.condition].success += 1;
     if (r.executorError) byCondition[r.condition].executorError += 1;
+    if (r.providerError) byCondition[r.condition].providerError += 1;
   }
 
   console.log("\n=== by condition ===");
   for (const cond of RQ1_CONDITIONS) {
-    const s = byCondition[cond] ?? { total: 0, success: 0, executorError: 0 };
+    const s = byCondition[cond] ?? { total: 0, success: 0, executorError: 0, providerError: 0 };
     const rate = s.total > 0 ? ((s.success / s.total) * 100).toFixed(0) : "0";
-    const errStr = s.executorError > 0 ? ` [${s.executorError} executor errors]` : "";
+    const errStr = s.executorError > 0 || s.providerError > 0 ? ` [${s.executorError} exec, ${s.providerError} provider]` : "";
     console.log(`  ${cond.padEnd(25)} ${s.success}/${s.total} (${rate}%)${errStr}`);
   }
 
   console.log("\n=== by task ===");
-  const byTask: Record<string, { total: number; success: number; executorError: number }> = {};
+  const byTask: Record<string, { total: number; success: number; executorError: number; providerError: number }> = {};
   for (const r of results) {
-    if (!byTask[r.taskId]) byTask[r.taskId] = { total: 0, success: 0, executorError: 0 };
+    if (!byTask[r.taskId]) byTask[r.taskId] = { total: 0, success: 0, executorError: 0, providerError: 0 };
     byTask[r.taskId].total += 1;
     if (r.success) byTask[r.taskId].success += 1;
     if (r.executorError) byTask[r.taskId].executorError += 1;
+    if (r.providerError) byTask[r.taskId].providerError += 1;
   }
   for (const [tid, s] of Object.entries(byTask).sort()) {
     const rate = ((s.success / s.total) * 100).toFixed(0);
-    const errStr = s.executorError > 0 ? ` [${s.executorError} err]` : "";
+    const errStr = s.executorError > 0 || s.providerError > 0 ? ` [${s.executorError} exec, ${s.providerError} provider]` : "";
     console.log(`  ${tid}  ${s.success}/${s.total} (${rate}%)${errStr}`);
   }
 
   const totalSuccess = results.filter((r) => r.success).length;
   const totalExecutorErrors = results.filter((r) => r.executorError).length;
+  const totalProviderErrors = results.filter((r) => r.providerError).length;
   console.log(`\ntotal: ${totalSuccess}/${results.length} (${((totalSuccess / results.length) * 100).toFixed(0)}%)`);
   console.log(`executor errors: ${totalExecutorErrors}/${results.length}`);
+  console.log(`provider errors: ${totalProviderErrors}/${results.length}`);
   console.log(`total duration: ${(results.reduce((s, r) => s + r.durationMs, 0) / 1000 / 60).toFixed(1)} min`);
 
   await session.logger.write({

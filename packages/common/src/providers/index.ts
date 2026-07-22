@@ -1,9 +1,7 @@
-import { createSiliconFlowClient, createSiliconFlowClientFromEnv } from "./siliconflow.js";
 import { OpenAiCompatibleClient } from "./openai-compatible.js";
 import type { ProviderConfig } from "./openai-compatible.js";
 
 export { OpenAiCompatibleClient, type ProviderConfig, LlmCallError } from "./openai-compatible.js";
-export { createSiliconFlowClient, createSiliconFlowClientFromEnv, type SiliconFlowConfig } from "./siliconflow.js";
 
 export type ProviderFactory = (config: ProviderConfig) => OpenAiCompatibleClient;
 
