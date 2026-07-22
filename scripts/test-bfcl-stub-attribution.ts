@@ -26,7 +26,7 @@ import { buildRq1Input, RQ1_CONDITIONS } from "../packages/experiments/dist/rq1.
 import { BfclV4MemoryExecutor } from "../packages/experiments/dist/index.js";
 import type { Rq1Condition } from "../packages/experiments/dist/rq1.js";
 
-const TASKS_PATH = "/Users/wondery/paper/Prologue/data/canonical/bfcl_v4_memory.jsonl";
+const TASKS_PATH = "data/canonical/bfcl_v4_memory.jsonl";
 const SAMPLE_SIZE = 15; // 5 scenarios × 3 backends = 15 tasks × 8 conditions = 120 runs
 
 async function main(): Promise<void> {

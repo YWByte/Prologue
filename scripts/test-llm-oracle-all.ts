@@ -40,11 +40,14 @@ type Checkpoint = {
   completed: RunResult[];
 };
 
+// Load .env early so PROLOGUE_APPWORLD_* / API keys are visible to CONFIG below.
+loadEnvIntoProcess();
+
 const CONFIG = {
   tasksPath: "data/canonical/appworld-batch_a_train.jsonl",
-  appworldRoot: "data/raw/appworld",
+  appworldRoot: process.env.PROLOGUE_APPWORLD_ROOT ?? "data/raw/appworld",
   rawManifest: "data/raw/appworld/batch_a_train",
-  pythonPath: ".venv-appworld/bin/python",
+  pythonPath: process.env.PROLOGUE_APPWORLD_PYTHON ?? ".venv-appworld/bin/python",
   basePort: 9100,
   experimentNamePrefix: "prologue_rq1_a_train",
   llmProvider: "dashscope",

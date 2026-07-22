@@ -159,7 +159,7 @@ async function main(): Promise<void> {
     // Start a server for this task
     const port = 9300 + tasks.indexOf(task);
     const server = new AppWorldServerManager({
-      pythonPath: ".venv-appworld/bin/python",
+      pythonPath: process.env.PROLOGUE_APPWORLD_PYTHON ?? ".venv-appworld/bin/python",
       appworldRoot,
       port,
       scriptsDir: join(workspaceRoot, "python", "appworld"),
@@ -183,7 +183,7 @@ async function main(): Promise<void> {
           mode: "init",
         },
         {
-          pythonPath: ".venv-appworld/bin/python",
+          pythonPath: process.env.PROLOGUE_APPWORLD_PYTHON ?? ".venv-appworld/bin/python",
           scriptsDir: join(workspaceRoot, "python", "appworld"),
           timeoutMs: 60_000,
         },

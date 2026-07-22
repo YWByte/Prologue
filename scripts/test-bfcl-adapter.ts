@@ -19,7 +19,7 @@
 import { readCanonicalTasks } from "../packages/data/dist/index.js";
 import { buildRq1Input, RQ1_CONDITIONS } from "../packages/experiments/dist/rq1.js";
 
-const TASKS_PATH = "/Users/wondery/paper/Prologue/data/canonical/bfcl_v4_memory.jsonl";
+const TASKS_PATH = "data/canonical/bfcl_v4_memory.jsonl";
 
 type TestResult = { name: string; passed: boolean; detail?: string };
 const results: TestResult[] = [];

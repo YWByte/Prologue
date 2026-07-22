@@ -128,11 +128,11 @@ async function runRq1RunCommand(args: Args): Promise<void> {
   const appworldRoot =
     (typeof args.appworldRoot === "string" ? args.appworldRoot : undefined) ??
     process.env.PROLOGUE_APPWORLD_ROOT ??
-    "/Users/wondery/paper/Prologue/data/raw/appworld";
+    "data/raw/appworld";
   const pythonPath =
     (typeof args.python === "string" ? args.python : undefined) ??
     process.env.PROLOGUE_APPWORLD_PYTHON ??
-    "/Users/wondery/paper/Prologue/.venv-appworld/bin/python";
+    ".venv-appworld/bin/python";
   const basePort = Number(args.basePort ?? 9000);
   const experimentNamePrefix =
     (typeof args.experimentNamePrefix === "string" ? args.experimentNamePrefix : undefined) ??

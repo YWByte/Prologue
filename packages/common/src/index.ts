@@ -37,7 +37,13 @@ export type EvalResult = {
 export {
   OpenAiCompatibleClient,
   type ProviderConfig,
+  type VllmConfig,
   LlmCallError,
+  createVllmClient,
+  createVllmClientFromEnv,
+  VLLM_DEFAULT_BASE_URL,
+  VLLM_DEFAULT_API_KEY,
+  VLLM_DEFAULT_MODEL,
   createClient,
   createClientFromEnv,
   registerProvider,

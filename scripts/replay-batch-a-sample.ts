@@ -127,7 +127,7 @@ async function main(): Promise<void> {
     console.log(`\n[${taskId}] replaying ${apiCalls.length} ground truth calls...`);
     const port = 9400 + targets.indexOf(taskId);
     const server = new AppWorldServerManager({
-      pythonPath: ".venv-appworld/bin/python",
+      pythonPath: process.env.PROLOGUE_APPWORLD_PYTHON ?? ".venv-appworld/bin/python",
       appworldRoot,
       port,
       scriptsDir: join(workspaceRoot, "python", "appworld"),
@@ -141,7 +141,7 @@ async function main(): Promise<void> {
       const { initAppWorldTask } = await import("../packages/experiments/dist/executors/appworld_python.js");
       const initResult = await initAppWorldTask(
         { task_id: taskId, experiment_name: `replay_a_${taskId}`, root: appworldRoot, remote_apis_url: server.baseUrl, mode: "init" },
-        { pythonPath: ".venv-appworld/bin/python", scriptsDir: join(workspaceRoot, "python", "appworld"), timeoutMs: 60_000 },
+        { pythonPath: process.env.PROLOGUE_APPWORLD_PYTHON ?? ".venv-appworld/bin/python", scriptsDir: join(workspaceRoot, "python", "appworld"), timeoutMs: 60_000 },
       );
       if (!initResult.ok) {
         console.error(`  init failed: ${initResult.error}`);

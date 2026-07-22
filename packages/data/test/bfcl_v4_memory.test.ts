@@ -7,15 +7,13 @@ import { join } from "node:path";
 import { canonicalTaskSchema } from "@prologue/schemas";
 import { BfclV4MemoryAdapter } from "../src/adapters/bfcl_v4_memory.js";
 
-// vitest resolves process.cwd() to the workspace root (where vitest runs),
-// which may be either /Users/wondery/paper/Prologue or /Users/wondery/paper.
+// vitest resolves process.cwd() to the workspace root (where vitest runs).
 // Use INIT_CWD (set by pnpm to the package root) as a fallback, then
 // resolve to the canonical Prologue workspace.
 function resolveRawRoot(): string {
   const candidates = [
     process.env.INIT_CWD,
     process.cwd(),
-    "/Users/wondery/paper/Prologue",
   ].filter(Boolean) as string[];
   for (const base of candidates) {
     const candidate = join(base, "data", "raw", "bfcl_v4_memory");
@@ -23,7 +21,9 @@ function resolveRawRoot(): string {
     // that looks plausible. The adapter will throw a clear error if missing.
     if (base.includes("Prologue")) return candidate;
   }
-  return join(candidates[0] ?? "", "data", "raw", "bfcl_v4_memory");
+  throw new Error(
+    "Could not locate Prologue workspace root. Run via `pnpm test` from the workspace root.",
+  );
 }
 
 const RAW_ROOT = resolveRawRoot();
