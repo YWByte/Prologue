@@ -50,8 +50,8 @@ const CONFIG = {
   pythonPath: process.env.PROLOGUE_APPWORLD_PYTHON ?? ".venv-appworld/bin/python",
   basePort: 9100,
   experimentNamePrefix: "prologue_rq1_a_train",
-  llmProvider: "vllm",
-  llmModel: "qwen3.5-27b",
+  llmProvider: "siliconflow",
+  llmModel: "Qwen/Qwen3.5-27B",
   enableThinking: false,
   maxSteps: 800,
   maxTokens: 4096,
@@ -62,7 +62,7 @@ const CONFIG = {
   checkpointEvery: 50,
   // If set, load valid (non-executor_error) results from this session dir as "already completed",
   // and rerun all executor_error runs in a NEW session. Leave empty for fresh run.
-  resumeValidFrom: "runs/2026-07-20T11-05-16-754Z_rq1_oracle_attribution_llm_a_train_c355edbd",
+  resumeValidFrom: "runs/2026-07-22T16-41-26-975Z_rq1_oracle_attribution_llm_a_train_276d6083",
 };
 
 function configHash(): string {

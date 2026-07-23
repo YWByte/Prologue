@@ -36,6 +36,9 @@ const WORKSPACE_ROOT = join(__dirname, "..");
  *   2. Efficiency (avg steps) — oracle_memory group vs baseline
  */
 
+// Load .env early so API keys are visible to CONFIG below.
+loadEnvIntoProcess();
+
 const CONFIG = {
   tasksPath: join(WORKSPACE_ROOT, "data/canonical/bfcl_v4_memory.jsonl"),
   sampleMode: "full" as "sample5" | "full",
@@ -60,6 +63,9 @@ const CONFIG = {
    * quota is exhausted.
    */
   circuitBreakerThreshold: 5,
+  // If set, load valid (non-error) results from this session dir as "already completed",
+  // and rerun all executor_error/provider_error runs in a NEW session.
+  resumeValidFrom: "" as string,
 };
 
 const METHOD = "oracle_attribution_llm_bfcl_v4";
@@ -72,6 +78,7 @@ type RunResult = {
   steps: number;
   durationMs: number;
   executorError: boolean;
+  providerError: boolean;
   derivedAnswer: string;
   goldCandidates: string[];
   reason: string;
@@ -127,8 +134,6 @@ function pickSample(tasks: CanonicalTask[], mode: "sample5" | "full"): Canonical
 }
 
 async function main(): Promise<void> {
-  loadEnvIntoProcess();
-
   const tasks = await readCanonicalTasks(CONFIG.tasksPath);
   console.log(`loaded ${tasks.length} canonical tasks`);
 
@@ -162,10 +167,29 @@ async function main(): Promise<void> {
   const workspaceRoot = WORKSPACE_ROOT;
   const runsRoot = join(workspaceRoot, "runs");
 
+  // Resume from a previous session's checkpoint if configured.
+  let results: RunResult[] = [];
+  const completedKeys = new Set<string>();
+  let resumedRunDir: string | null = null;
+
+  if (CONFIG.resumeValidFrom) {
+    const cp = await loadCheckpoint(CONFIG.resumeValidFrom);
+    if (cp) {
+      const valid = cp.completed.filter((r) => !r.executorError && !r.providerError);
+      const errors = cp.completed.filter((r) => r.executorError || r.providerError);
+      results = valid;
+      for (const r of valid) {
+        completedKeys.add(`${r.taskId}::${r.condition}`);
+      }
+      console.log(`resumeValidFrom: ${CONFIG.resumeValidFrom}`);
+      console.log(`  valid (skip): ${valid.length}, rerun: ${errors.length} (executor_error: ${errors.filter(r => r.executorError).length}, provider_error: ${errors.filter(r => r.providerError).length})`);
+    }
+  }
+
   const session = await Session.start({
     rq: "rq1",
     method: METHOD,
-    config: { ...CONFIG, sampleSize: sample.length, totalRuns: sample.length * RQ1_CONDITIONS.length },
+    config: { ...CONFIG, resumedFrom: CONFIG.resumeValidFrom || undefined, sampleSize: sample.length, totalRuns: sample.length * RQ1_CONDITIONS.length },
     dataset: {
       taskCount: tasks.length,
       sampledTaskIds: sample.map((t) => t.taskId),
@@ -213,17 +237,8 @@ async function main(): Promise<void> {
   let queueCursor = 0;
   let sinceLastCheckpoint = 0;
 
-  // Attempt to resume from a previous checkpoint with matching configHash.
-  // This is critical for the full 3720-run experiment — if it crashes at run
-  // 2000, we want to resume rather than restart from 0.
-  const previousCheckpoint = await loadCheckpoint(runDir);
-  if (previousCheckpoint && previousCheckpoint.configHash === configHash()) {
-    console.log(`resuming from checkpoint: ${previousCheckpoint.completed.length}/${totalRuns} runs already completed`);
-    for (const r of previousCheckpoint.completed) {
-      results.push(r);
-      completedKeys.add(`${r.taskId}::${r.condition}`);
-    }
-  }
+  // Note: resumeValidFrom already populated `results` and `completedKeys` above.
+  // The old in-place checkpoint resume logic is removed in favor of resumeValidFrom.
 
   console.log(`running ${totalRuns} runs with concurrency=${CONFIG.runConcurrency}`);
   console.log(`already completed: ${completedKeys.size}, remaining: ${totalRuns - completedKeys.size}\n`);
@@ -250,11 +265,14 @@ async function main(): Promise<void> {
     const startedAt = Date.now();
 
     let executorError = false;
+    let providerError = false;
     try {
       const result = await executor.execute(input);
       const durationMs = Date.now() - startedAt;
       const stepCount = result.steps.length;
-      executorError = typeof result.reason === "string" && result.reason.startsWith("executor_error");
+      const reason = typeof result.reason === "string" ? result.reason : "";
+      executorError = reason.startsWith("executor_error");
+      providerError = reason.startsWith("provider_error");
 
       const runResult: RunResult = {
         taskId: task.taskId,
@@ -264,6 +282,7 @@ async function main(): Promise<void> {
         steps: stepCount,
         durationMs,
         executorError,
+        providerError,
         derivedAnswer: (result.metadata?.derivedAnswer as string) ?? "",
         goldCandidates: (result.metadata?.goldCandidates as string[]) ?? [],
         reason: result.reason ?? "",
@@ -275,18 +294,19 @@ async function main(): Promise<void> {
       // reset the circuit breaker counter.
       consecutivePermanentErrors = 0;
       const completedSoFar = results.length;
-      if (totalRuns <= 40 || completedSoFar % 100 === 0 || completedSoFar === totalRuns || executorError) {
+      if (totalRuns <= 40 || completedSoFar % 100 === 0 || completedSoFar === totalRuns || executorError || providerError) {
         console.log(
           `[${completedSoFar}/${totalRuns}] cond=${condition.padEnd(20)} ` +
             `success=${result.success} steps=${stepCount} dur=${(durationMs / 1000).toFixed(1)}s ` +
             `answer=${JSON.stringify(runResult.derivedAnswer.slice(0, 40))}` +
-            (executorError ? " [EXECUTOR_ERROR]" : ""),
+            (executorError ? " [EXECUTOR_ERROR]" : "") +
+            (providerError ? " [PROVIDER_ERROR]" : ""),
         );
       }
 
       await session.logger.write({
-        level: executorError ? "error" : result.success ? "info" : "warn",
-        type: executorError ? "executor_error" : "eval_result",
+        level: executorError || providerError ? "error" : result.success ? "info" : "warn",
+        type: executorError ? "executor_error" : providerError ? "provider_error" : "eval_result",
         rq: "rq1",
         taskId: task.taskId,
         source: task.source,
@@ -298,6 +318,7 @@ async function main(): Promise<void> {
           steps: stepCount,
           durationMs,
           executorError,
+          providerError,
           derivedAnswer: runResult.derivedAnswer,
           goldCandidates: runResult.goldCandidates,
           reason: result.reason,
@@ -330,8 +351,14 @@ async function main(): Promise<void> {
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       const message = error instanceof Error ? error.message : String(error);
-      executorError = true;
-      console.error(`[${runIndex}/${totalRuns}] EXECUTOR_ERROR task=${task.taskId} cond=${condition}: ${message}`);
+      const isProviderError = error instanceof LlmCallError;
+      const prefix = isProviderError ? "provider_error" : "executor_error";
+      if (isProviderError) {
+        providerError = true;
+      } else {
+        executorError = true;
+      }
+      console.error(`[${runIndex}/${totalRuns}] ${prefix.toUpperCase()} task=${task.taskId} cond=${condition}: ${message}`);
 
       // Circuit breaker: detect permanent LLM errors (insufficient_quota,
       // invalid_api_key, model_not_found, etc.). These will NEVER succeed
@@ -366,16 +393,17 @@ async function main(): Promise<void> {
         steps: 0,
         durationMs,
         executorError,
+        providerError,
         derivedAnswer: "",
         goldCandidates: [],
-        reason: `executor_error: ${message}`,
+        reason: `${prefix}: ${message}`,
       };
       results.push(runResult);
       completedKeys.add(key);
 
       await session.logger.write({
         level: "error",
-        type: "executor_error",
+        type: prefix,
         rq: "rq1",
         taskId: task.taskId,
         source: task.source,
@@ -455,14 +483,15 @@ async function main(): Promise<void> {
   console.log(`=== SUMMARY: BFCL V4 Memory RQ1 (LLM, ${CONFIG.llmModel}, ${sample.length} tasks × ${RQ1_CONDITIONS.length} conditions) ===`);
   console.log("=".repeat(80));
 
-  const byCondition: Record<string, { total: number; success: number; executorError: number; totalSteps: number; totalMs: number }> = {};
+  const byCondition: Record<string, { total: number; success: number; executorError: number; providerError: number; totalSteps: number; totalMs: number }> = {};
   for (const r of results) {
     if (!byCondition[r.condition]) {
-      byCondition[r.condition] = { total: 0, success: 0, executorError: 0, totalSteps: 0, totalMs: 0 };
+      byCondition[r.condition] = { total: 0, success: 0, executorError: 0, providerError: 0, totalSteps: 0, totalMs: 0 };
     }
     byCondition[r.condition].total += 1;
     if (r.success) byCondition[r.condition].success += 1;
     if (r.executorError) byCondition[r.condition].executorError += 1;
+    if (r.providerError) byCondition[r.condition].providerError += 1;
     byCondition[r.condition].totalSteps += r.steps;
     byCondition[r.condition].totalMs += r.durationMs;
   }
@@ -471,27 +500,28 @@ async function main(): Promise<void> {
   console.log("condition                     success  total   rate   avg_steps  avg_dur");
   console.log("-".repeat(80));
   for (const cond of RQ1_CONDITIONS) {
-    const s = byCondition[cond] ?? { total: 0, success: 0, executorError: 0, totalSteps: 0, totalMs: 0 };
+    const s = byCondition[cond] ?? { total: 0, success: 0, executorError: 0, providerError: 0, totalSteps: 0, totalMs: 0 };
     const rate = s.total > 0 ? ((s.success / s.total) * 100).toFixed(1) : "0.0";
     const avgSteps = s.total > 0 ? (s.totalSteps / s.total).toFixed(1) : "0.0";
     const avgDur = s.total > 0 ? (s.totalMs / s.total / 1000).toFixed(1) + "s" : "0.0s";
-    const errStr = s.executorError > 0 ? ` [${s.executorError} err]` : "";
+    const errStr = s.executorError > 0 || s.providerError > 0 ? ` [${s.executorError} exec, ${s.providerError} provider]` : "";
     console.log(
       `  ${cond.padEnd(28)} ${String(s.success).padStart(4)}/${String(s.total).padStart(2)}  ${rate.padStart(5)}%  ${avgSteps.padStart(8)}  ${avgDur.padStart(7)}${errStr}`,
     );
   }
 
   console.log("\n=== by task ===");
-  const byTask: Record<string, { total: number; success: number; executorError: number }> = {};
+  const byTask: Record<string, { total: number; success: number; executorError: number; providerError: number }> = {};
   for (const r of results) {
-    if (!byTask[r.taskId]) byTask[r.taskId] = { total: 0, success: 0, executorError: 0 };
+    if (!byTask[r.taskId]) byTask[r.taskId] = { total: 0, success: 0, executorError: 0, providerError: 0 };
     byTask[r.taskId].total += 1;
     if (r.success) byTask[r.taskId].success += 1;
     if (r.executorError) byTask[r.taskId].executorError += 1;
+    if (r.providerError) byTask[r.taskId].providerError += 1;
   }
   for (const [tid, s] of Object.entries(byTask).sort()) {
     const rate = ((s.success / s.total) * 100).toFixed(0);
-    const errStr = s.executorError > 0 ? ` [${s.executorError} err]` : "";
+    const errStr = s.executorError > 0 || s.providerError > 0 ? ` [${s.executorError} exec, ${s.providerError} provider]` : "";
     console.log(`  ${tid.padEnd(40)} ${s.success}/${s.total} (${rate}%)${errStr}`);
   }
 
@@ -559,7 +589,7 @@ async function main(): Promise<void> {
   // Per-condition breakdown for the efficiency dimension
   console.log("\n--- Per-condition step counts (lower = more efficient) ---");
   for (const cond of RQ1_CONDITIONS) {
-    const s = byCondition[cond] ?? { total: 0, success: 0, executorError: 0, totalSteps: 0, totalMs: 0 };
+    const s = byCondition[cond] ?? { total: 0, success: 0, executorError: 0, providerError: 0, totalSteps: 0, totalMs: 0 };
     const avgSteps = s.total > 0 ? (s.totalSteps / s.total).toFixed(1) : "n/a";
     const hasOracleMem = cond === "oracle_memory" || cond === "oracle_intent_memory" || cond === "oracle_memory_tool" || cond === "oracle_all";
     const tag = hasOracleMem ? "[M]" : "   ";
@@ -570,9 +600,11 @@ async function main(): Promise<void> {
 
   const totalSuccess = results.filter((r) => r.success).length;
   const totalExecutorErrors = results.filter((r) => r.executorError).length;
+  const totalProviderErrors = results.filter((r) => r.providerError).length;
   const totalDurationMin = results.reduce((s, r) => s + r.durationMs, 0) / 1000 / 60;
   console.log(`\ntotal: ${totalSuccess}/${results.length} (${((totalSuccess / results.length) * 100).toFixed(0)}%)`);
   console.log(`executor errors: ${totalExecutorErrors}/${results.length}`);
+  console.log(`provider errors: ${totalProviderErrors}/${results.length}`);
   console.log(`total wall-time-equivalent: ${totalDurationMin.toFixed(1)} min (sum of run durations)`);
 
   await session.logger.write({

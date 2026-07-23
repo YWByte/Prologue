@@ -127,17 +127,18 @@ export class BfclV4MemoryExecutor implements Executor {
         throw e;
       }
       const message = e instanceof Error ? e.message : String(e);
+      const prefix = e instanceof LlmCallError ? "provider_error" : "executor_error";
       steps.push({
         stepId: randomUUID(),
         type: "error",
         timestamp: new Date().toISOString(),
-        output: { message: `executor_error: ${message}` },
+        output: { message: `${prefix}: ${message}` },
         metadata: {},
       });
       return {
         success: false,
         score: 0,
-        reason: `executor_error: ${message}`,
+        reason: `${prefix}: ${message}`,
         steps,
         metadata,
       };

@@ -141,20 +141,23 @@ flowchart LR
 
 | 脚本 | 行数 | 用途 |
 |---|---|---|
-| `test-llm-oracle-all.ts` | 443 | **主 RQ1 LLM 实验驱动器**。硬编码 `appworld-batch_a_train.jsonl` + `qwen3.5-27b`。自实现 worker pool（`runConcurrency: 10`）、checkpoint、断点续跑、汇总打印。90 tasks × 8 conditions = 720 runs |
+| `test-llm-oracle-all.ts` | 443 | **主 RQ1 LLM 实验驱动器**。支持 `appworld-batch_a_train.jsonl`（90 task）或 `appworld-batch_a.jsonl`（147 task）。自实现 worker pool（`runConcurrency: 10`）、checkpoint、断点续跑（`resumeValidFrom`）、provider_error/executor_error 分类、汇总打印 |
 | `test-bfcl-llm-oracle-all.ts` | - | BFCL V4 主实验驱动器。465 tasks × 8 conditions = 3720 runs |
 | `test-bfcl-adapter.ts` | - | BFCL adapter 结构验证（53 checks）|
 | `test-bfcl-stub-attribution.ts` | - | BFCL stub agent 8-condition 归因矩阵验证 |
+| `analyze-rq1-results.ts` | 230 | RQ1 结果分析脚本。从 session.json 读取 trajectories，按 condition 统计 mean/median/min/max/success，计算 delta vs baseline、交互效应（synergy/antagonism）、per-task 分布、step count 效率 |
 | `replay-ground-truth.ts` | 228 | Stage 2 验证（5-task sample）。加载 canonical，每 task 启 AppWorld server，回放 `api_calls.json` 到 `AppWorldToolExecutor`，验证全部成功。无 LLM |
 | `replay-batch-a-sample.ts` | 173 | Stage 2 验证（全 A 批）。从 `/tmp/replay-targets.json` 读目标，覆盖 sample_5 未覆盖的多 app / path+body 场景 |
 
 **`test-llm-oracle-all.ts` 关键配置**：
-- `llmProvider: "dashscope"`, `llmModel: "qwen3.5-27b"`
-- `maxSteps: 800`, `maxTokens: 8192`, `enableThinking: false`
+- `llmProvider: "siliconflow"`（本地开发）/ `"vllm"`（服务器）/ `"dashscope"`（阿里云）
+- `llmModel: "Qwen/Qwen3.5-27B"`
+- `maxSteps: 800`, `maxTokens: 4096`, `enableThinking: false`
 - `rpm: 1000`, `apiMaxConcurrency: 50`, `runConcurrency: 10`
 - `basePort: 9100`, `checkpointEvery: 50`
-- 自动构建 canonical tasks（若缺失）
-- 可恢复：扫 `runs/` 找匹配 session，载 `checkpoint.json`，跳过已完成 `(taskId, condition)`；`configHash` 含 `llmModel|maxSteps|maxTokens|rpm|runConcurrency`
+- `resumeValidFrom`: 支持从指定 session 的 checkpoint.json 恢复，跳过 valid runs，重跑 executor_error/provider_error
+- `appworldRoot` / `pythonPath` 支持环境变量（`PROLOGUE_APPWORLD_ROOT` / `PROLOGUE_APPWORLD_PYTHON`）
+- 错误分类：`LlmCallError` → `provider_error`（API 提供商错误），其他 → `executor_error`（AppWorld server/Python 错误）
 
 ---
 
@@ -714,14 +717,15 @@ flowchart LR
     OAI_COMPAT --> CALLER
 ```
 
-**4 个内置 provider**：
+**5 个内置 provider**：
 
-| Provider | Base URL | Env Var |
-|---|---|---|
-| `siliconflow` | `https://api.siliconflow.cn/v1` | `SILICONFLOW_API_KEY` |
-| `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
-| `dashscope` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY`（用于 Qwen 系列） |
-| `deepseek` | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` |
+| Provider | Base URL | Env Var | 说明 |
+|---|---|---|---|
+| `siliconflow` | `https://api.siliconflow.cn/v1` | `SILICONFLOW_API_KEY` | 硅基流动 |
+| `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` | OpenAI |
+| `dashscope` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` | 阿里云通义（Qwen 系列） |
+| `deepseek` | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` | DeepSeek |
+| `vllm` | `http://localhost:4000/v1`（可 `VLLM_BASE_URL` 覆盖） | `VLLM_API_KEY`（可选，默认 `"EMPTY"`） | 本地 vLLM 服务器 |
 
 **`OpenAiCompatibleClient` 关键特性**：
 - 内置 `RateLimiter`（RPM + maxConcurrency，setTimeout 队列）
@@ -747,15 +751,14 @@ runs/2026-07-20T03-51-09-419Z_rq1_oracle_attribution_llm_a_train_1a1af548/
                         # {runDir, tasksPath, configHash, completed: RunResult[]}
 ```
 
-**现有 sessions**（含 2026-07-20 smoke2 与 A-train 重启）：
+**现有 sessions**：
 
 | Session | 内容 | 状态 |
 |---|---|---|
 | `2026-07-19T12-16-40...rq1_..._701ba5b2` | qwen3.5-27b 5×8=40 run | ✅ oracle_all 0.83 vs baseline 0.69 (+0.14) |
 | `2026-07-19T13-45-13...rq1_..._ce04b589` | qwen3.5-35b-a3b 5×8=40 run | ✅ oracle_all 0.79 vs baseline 0.69 (+0.10) |
-| `2026-07-19T14-14...data_data_build_*`（4 个） | data build sessions | ✅ 产出 `appworld-batch_a.jsonl` 147 tasks |
-| `2026-07-20T03-51-09...rq1_..._1a1af548` | A-train 90×8=720 runs，qwen3.5-27b，maxSteps=60 | 🟡 旧版（已弃用） |
 | `2026-07-20T07-25-50...rq1_..._f2fc4928` | qwen3.5-27b 10×2=20 run smoke2 | ✅ oracle_all 0.83 vs baseline 0.76 (+0.08) |
+| `2026-07-22T15-00-00...rq1_..._merged` | **batch_a 147×8=1176 runs 合并结果** | ✅ **oracle_all 0.748 vs baseline 0.692 (+8.1%)** |
 
 ---
 
@@ -838,11 +841,11 @@ pnpm test            # 各包 vitest run --passWithNoTests
 | RQ1 mock runner | ✅ 完成 |
 | RQ1 real executor（stub + LLM agent） | ✅ 完成 |
 | Per-app token 隔离 / 敏感字段 redaction | ✅ 完成 |
-| 并行编排 + checkpointing | ✅ 完成 |
+| 并行编排 + checkpointing + provider_error 分离 | ✅ 完成 |
+| vLLM provider + 环境变量路径配置 | ✅ 完成 |
 | 5-task smoke run（qwen3.5-27b / 35b-a3b） | ✅ oracle_all > baseline（+0.14 / +0.10） |
 | 10-task smoke2（qwen3.5-27b，maxSteps=600 + STRICT prompt） | ✅ oracle_all 0.83 vs baseline 0.76（+0.08） |
-| BFCL V4 adapter + executor + 验证脚本 | ✅ 完成（53 结构检查 + 8 归因检查） |
-| A-train 全量 90×8=720 runs（qwen3.5-27b，maxSteps=800） | 🟡 进行中（c355edbd 合并 286 valid + 434 error，续跑中） |
+| **batch_a 全量 147×8=1176 runs（qwen3.5-27b）** | ✅ **完成** — oracle_all 0.748 vs baseline 0.692（+8.1%） |
 | BFCL V4 RQ1 全量实验 | ❌ 未开始（adapter + executor 已就绪） |
 | RQ2 Prologue 方法 | ❌ 未开始 |
 | RQ3 训练式 Verifier | ❌ 未开始（接口已定义） |

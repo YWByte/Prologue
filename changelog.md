@@ -1,5 +1,68 @@
 # Changelog
 
+## 2026-07-23
+
+> batch_a 全量 147×8=1176 runs 实验完成；provider_error 与 executor_error 分离；新增 vLLM provider 和结果分析脚本。
+
+### AppWorld batch_a 全量实验完成
+
+**147 tasks × 8 conditions = 1176 runs**（qwen3.5-27b，跨 dashscope/vllm/siliconflow 三种 provider 完成）
+
+| condition | n | mean | median | succ | delta vs baseline |
+|---|---|---|---|---|---|
+| baseline | 147 | 0.692 | 0.750 | 19 | — |
+| oracle_intent | 147 | 0.684 | 0.800 | 16 | -0.008 |
+| oracle_memory | 147 | 0.710 | 0.800 | 21 | +0.018 |
+| oracle_tool | 147 | 0.702 | 0.778 | 18 | +0.010 |
+| oracle_intent_memory | 147 | 0.728 | 0.800 | 22 | +0.036 |
+| oracle_intent_tool | 147 | 0.669 | 0.750 | 14 | -0.023 |
+| oracle_memory_tool | 147 | 0.724 | 0.800 | 23 | +0.032 |
+| oracle_all | 147 | 0.748 | 0.800 | 24 | +0.056 |
+
+**关键发现**：
+- oracle_all (0.748) > baseline (0.692)，+8.1%，全 oracle 提升明显
+- oracle_intent_tool (0.669) < baseline (0.692)，Intent+Tool 拮抗效应（synergy = -0.025）
+- oracle_intent 单独无提升（-0.008），但与 Memory 组合时产生协同效应（synergy = +0.026）
+- Memory 是最稳定的正向 oracle，所有含 memory 的 condition 都高于 baseline
+- Intent+Tool 负交互效应原因：agent 过度自信，步骤骤减（57.2 vs 61.8），跳过必要探索
+
+### provider_error vs executor_error 分离
+
+- `packages/experiments/src/executors/appworld.ts`：catch 块区分 `LlmCallError`（provider_error）与其他错误（executor_error）
+- `scripts/test-llm-oracle-all.ts`：`RunResult` 新增 `providerError` 字段，resume 逻辑同时重跑两种 error
+- API 提供商错误（Arrearage/quota/rate limit/auth/context length）不再混入 executor_error
+
+### vLLM provider（`packages/common/src/providers/vllm.ts`）
+
+- 新增 vLLM OpenAI-compatible provider，默认 `baseUrl: http://localhost:4000/v1`，`apiKey: "EMPTY"`
+- `ProviderSpec` 新增 `optionalApiKey`（vLLM 不需要 key 时用 placeholder）和 `baseUrlEnvKey`（环境变量覆盖 baseUrl）
+- 支持 `VLLM_BASE_URL` / `VLLM_API_KEY` 环境变量
+
+### 环境变量驱动路径配置
+
+- `scripts/test-llm-oracle-all.ts`：`appworldRoot` 支持 `PROLOGUE_APPWORLD_ROOT`，`pythonPath` 支持 `PROLOGUE_APPWORLD_PYTHON`
+- `loadEnvIntoProcess()` 提前到 CONFIG 之前，确保环境变量对 CONFIG 可见
+
+### 结果分析脚本（`scripts/analyze-rq1-results.ts`）
+
+- 从 session.json 读取 trajectories，按 condition 统计 mean/median/min/max/success
+- 计算 delta vs baseline、交互效应（synergy/antagonism/additive）
+- per-task delta 分布（better/same/worse）
+- step count 效率分析
+
+### 仓库清理
+
+- 合并 14 个中间 session 到 1 个 merged session（1176 trajectories）
+- 删除 13 个中间 session 目录，`runs/` 只保留 merged session
+- 恢复 `.gitignore` 忽略 `runs/`
+
+### Token 消耗估算
+
+- 1176 runs 总计 ~953M input tokens + ~1.5M output tokens
+- 平均每 run ~898k tokens（29.2 LLM calls）
+- 主要消耗在 input（工具描述 + 历史对话累积），output 占比 <0.2%
+- 费用：~¥578（dashscope 定价 ¥0.6/M input + ¥4.8/M output）
+
 ## 2026-07-20
 
 > 工程修复让 oracle 信号在 10-task smoke 上稳定为正；新增 BFCL V4 Memory adapter 与 executor；准备 A-train 90×8=720 runs 全量实验。
