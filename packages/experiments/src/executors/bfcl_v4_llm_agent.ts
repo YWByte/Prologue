@@ -122,9 +122,9 @@ function buildSystemPrompt(tools: ToolItem[]): string {
     "Rules:",
     "- ALWAYS start your response with TOOL_CALL or COMPLETE. Never start with any other text.",
     "- Some memory is pre-staged in the prompt (under 'Pre-staged context'); some is only available via memory tools (under 'Available in memory backend').",
-    "- If the pre-staged context already contains the answer, emit COMPLETE directly without any tool call.",
-    "- Otherwise, use list_keys or retrieve_all to see what's in the memory backend, then key_search/retrieve to find the relevant chunk.",
-    "- Most questions are answerable in 0-3 tool calls if the answer isn't already in the pre-staged context. Do not over-search.",
+    "- Read pre-staged context carefully before deciding whether a memory tool is needed.",
+    "- Otherwise, use the available retrieval tools to find the relevant conversation.",
+    "- Most questions are answerable in 0-3 tool calls. Do not over-search.",
     "- When you have the answer, emit COMPLETE <answer>. The answer must be the concise factual value (e.g. \"Michael\", \"35\", \"Diabetes\", \"Legend Investments\"), not a full sentence.",
     "- If a key_search returns multiple results, retrieve the highest-ranked one and read its content carefully to extract the answer.",
   ].join("\n");
@@ -195,7 +195,7 @@ function buildUserPrompt(input: ExecutorInput): string {
     "Available in memory backend (use list_keys / key_search / retrieve to read):",
     toolOnlyText,
     "",
-    "Answer the question now. If the pre-staged context already contains the answer, emit COMPLETE directly. Otherwise, call a memory tool to retrieve the relevant chunk first.",
+    "Answer the question now. Use the pre-staged context when it is relevant; otherwise, call a memory tool to retrieve the relevant conversation.",
   ].join("\n");
 }
 
@@ -252,66 +252,82 @@ function truncateOutput(output: unknown, maxChars = TOOL_OUTPUT_MAX_CHARS): stri
  * The simulation treats every memory item uniformly as `{id, content}` —
  * it does NOT read `metadata` (goldAnswerCandidates etc. are eval-only).
  */
+function rankMemory(memory: MemoryItem[], query: string, k: number): Array<{ key: string; score: number; value: string }> {
+  const queryLower = query.toLowerCase();
+  const queryTokens = queryLower.split(/\s+/).filter(Boolean);
+  return memory
+    .map((item) => {
+      const contentLower = item.content.toLowerCase();
+      let score = 0;
+      for (const token of queryTokens) {
+        if (contentLower.includes(token)) score += 1;
+      }
+      if (contentLower.includes(queryLower)) score += 2;
+      return { key: item.id, score, value: item.content };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, k);
+}
+
+function toolParameterNames(tool: ToolItem): Set<string> {
+  const schema = tool.schema as { parameters?: { properties?: Record<string, unknown> } } | undefined;
+  return new Set(Object.keys(schema?.parameters?.properties ?? {}));
+}
+
 function simulateToolCall(
   tool: ToolItem,
   args: Record<string, unknown>,
   memory: MemoryItem[],
 ): ToolCallResult {
   const id = tool.id.toLowerCase();
+  const params = toolParameterNames(tool);
 
   if (id.endsWith("_list_keys")) {
-    return { ok: true, output: { keys: memory.map((m) => m.id) } };
-  }
-
-  if (id.endsWith("_key_search")) {
-    const query = typeof args.query === "string" ? args.query : "";
-    const kRaw = args.k ?? args.top_k ?? 5;
-    const k = typeof kRaw === "number" && kRaw > 0 ? Math.floor(kRaw) : 5;
-    if (query.length === 0) {
-      return { ok: false, output: null, error: "key_search requires a non-empty 'query' argument" };
-    }
-    const queryLower = query.toLowerCase();
-    const queryTokens = queryLower.split(/\s+/).filter(Boolean);
-    const ranked = memory
-      .map((m) => {
-        const contentLower = m.content.toLowerCase();
-        // Score = number of query tokens that appear as substrings in content.
-        let score = 0;
-        for (const tok of queryTokens) {
-          if (contentLower.includes(tok)) score += 1;
-        }
-        // Bonus for the full query string as a substring.
-        if (contentLower.includes(queryLower)) score += 2;
-        return { key: m.id, score };
-      })
-      .filter((r) => r.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, k);
-    return { ok: true, output: { ranked_results: ranked } };
+    return { ok: true, output: { keys: memory.map((item) => item.id) } };
   }
 
   if (id.endsWith("_retrieve_all")) {
     return {
       ok: true,
-      output: {
-        items: memory.map((m) => ({ key: m.id, value: m.content })),
-      },
+      output: { items: memory.map((item) => ({ key: item.id, value: item.content })) },
     };
   }
 
-  if (id.endsWith("_retrieve")) {
+  if (id.endsWith("_key_search") || (id.endsWith("_retrieve") && params.has("query"))) {
+    const query = typeof args.query === "string" ? args.query : "";
+    const kRaw = args.k ?? args.top_k ?? 5;
+    const k = typeof kRaw === "number" && kRaw > 0 ? Math.floor(kRaw) : 5;
+    if (query.length === 0) {
+      return { ok: false, output: null, error: `${tool.id} requires a non-empty 'query' argument` };
+    }
+    const ranked = rankMemory(memory, query, k);
+    if (id.endsWith("_key_search")) {
+      return { ok: true, output: { ranked_results: ranked.map(({ key, score }) => ({ key, score })) } };
+    }
+    return { ok: true, output: { results: ranked } };
+  }
+
+  if (id.endsWith("_retrieve") && params.has("key")) {
     const key = typeof args.key === "string" ? args.key : "";
     if (key.length === 0) {
-      return { ok: false, output: null, error: "retrieve requires a 'key' argument" };
+      return { ok: false, output: null, error: `${tool.id} requires a 'key' argument` };
     }
-    const item = memory.find((m) => m.id === key);
+    const item = memory.find((candidate) => candidate.id === key);
     if (!item) {
       return { ok: false, output: null, error: `key not found: ${key}` };
     }
     return { ok: true, output: { key: item.id, value: item.content } };
   }
 
-  if (id.endsWith("_add") || id.endsWith("_clear") || id.endsWith("_remove") || id.endsWith("_replace")) {
+  if (id.endsWith("_retrieve") && params.size === 0) {
+    return {
+      ok: true,
+      output: { memory_content: memory.map((item) => `[${item.id}]\n${item.content}`).join("\n\n") },
+    };
+  }
+
+  if (id.endsWith("_add") || id.endsWith("_clear") || id.endsWith("_remove") || id.endsWith("_replace") || id.endsWith("_update") || id.endsWith("_append")) {
     return {
       ok: true,
       output: { mutated: false, note: "mutation tools are no-ops in this eval environment" },
@@ -449,9 +465,12 @@ export class LlmBfclMemoryAgent {
       }
     }
 
-    const hasOracleMemory = input.memory.some(
-      (m) => (m.metadata as Record<string, unknown> | undefined)?.oracle === true,
-    );
+    const hasOracleMemory = input.memory.some((memory) => {
+      const metadata = memory.metadata as Record<string, unknown> | undefined;
+      return metadata?.promptInjected === true
+        && metadata?.memoryRole === "common"
+        && memory.type === "history";
+    });
 
     return {
       steps,

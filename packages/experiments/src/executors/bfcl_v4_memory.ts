@@ -12,12 +12,12 @@ import { LlmBfclMemoryAgent } from "./bfcl_v4_llm_agent.js";
  * evaluator via Python), BFCL V4 has no external server — its "memory backend"
  * is conceptual, and the prereq conversation content is already materialized
  * as oracle memory in the ExecutorInput. Evaluation is exact_match against
- * the gold answer candidates carried in the oracle memory item's metadata
+ * the gold answer candidates carried only in task-level evaluator metadata
  * (populated by the adapter from BFCL's `possible_answer` file).
  *
  * Two modes (selected via constructor config):
- *   - Stub agent (default, no config): no LLM, deterministic answer
- *     derivation from oracle memory. Used for RQ1 attribution validation.
+ *   - Stub agent (default, no config): harness-only wiring check that never
+ *     derives answers. It is not used as RQ1 attribution evidence.
  *   - LLM agent (when `llm` and `llmModel` are set): real ReAct agent that
  *     calls simulated memory tools and emits COMPLETE <answer>. The LLM
  *     never reads memory metadata; only `content`, `id`, `type`, and the
@@ -95,6 +95,8 @@ export class BfclV4MemoryExecutor implements Executor {
       const evalResult = evaluateExactMatch(agentResult.derivedAnswer, goldCandidates);
       metadata.goldCandidates = goldCandidates;
       metadata.evalMatched = evalResult.matched;
+      const failureMode = classifyFailureMode(input, agentResult.steps, evalResult.matched);
+      metadata.failureMode = failureMode;
 
       const evalStep: TrajectoryStep = {
         stepId: randomUUID(),
@@ -105,8 +107,9 @@ export class BfclV4MemoryExecutor implements Executor {
           derivedAnswer: agentResult.derivedAnswer,
           goldCandidates,
           reason: evalResult.reason,
+          failureMode,
         },
-        metadata: {},
+        metadata: { failureMode },
       };
       steps.push(evalStep);
 
@@ -135,6 +138,7 @@ export class BfclV4MemoryExecutor implements Executor {
         output: { message: `${prefix}: ${message}` },
         metadata: {},
       });
+      metadata.failureMode = prefix;
       return {
         success: false,
         score: 0,
@@ -162,6 +166,74 @@ function readGoldCandidates(evaluatorMetadata: Record<string, unknown> | undefin
     return candidates.filter((c): c is string => typeof c === "string");
   }
   return [];
+}
+
+type BfclFailureMode =
+  | "success"
+  | "selection_missed"
+  | "selection_wrong"
+  | "extraction_or_reasoning_fail"
+  | "tool_selection_fail"
+  | "protocol_fail"
+  | "provider_error"
+  | "executor_error";
+
+function classifyFailureMode(
+  input: ExecutorInput,
+  steps: TrajectoryStep[],
+  success: boolean,
+): BfclFailureMode {
+  if (success) return "success";
+  const evaluatorMetadata = input.evaluatorMetadata ?? {};
+  const goldMemoryIds = Array.isArray(evaluatorMetadata.rq1GoldMemoryIds)
+    ? evaluatorMetadata.rq1GoldMemoryIds.filter((id): id is string => typeof id === "string")
+    : [];
+  const preStagedIds = new Set(
+    input.memory
+      .filter((memory) => (memory.metadata as Record<string, unknown>).promptInjected === true)
+      .map((memory) => memory.id),
+  );
+  const retrievedIds = new Set<string>();
+  let hadToolError = false;
+  let hadReadTool = false;
+
+  for (const step of steps) {
+    if (step.type !== "tool") continue;
+    const output = step.output as { ok?: unknown; output?: unknown } | undefined;
+    if (output?.ok === false) hadToolError = true;
+    const toolId = (step.input as { toolId?: unknown } | undefined)?.toolId;
+    if (typeof toolId !== "string") continue;
+    const lowerToolId = toolId.toLowerCase();
+    if (lowerToolId.includes("retrieve") || lowerToolId.includes("search") || lowerToolId.includes("list_keys")) {
+      hadReadTool = true;
+    }
+    const response = output?.output as { key?: unknown; keys?: unknown; items?: unknown; ranked_results?: unknown } | undefined;
+    if (typeof response?.key === "string") retrievedIds.add(response.key);
+    if (Array.isArray(response?.keys)) {
+      for (const key of response.keys) if (typeof key === "string") retrievedIds.add(key);
+    }
+    if (Array.isArray(response?.items)) {
+      for (const item of response.items) {
+        if (item && typeof item === "object" && typeof (item as { key?: unknown }).key === "string") {
+          retrievedIds.add((item as { key: string }).key);
+        }
+      }
+    }
+    if (Array.isArray(response?.ranked_results)) {
+      for (const item of response.ranked_results) {
+        if (item && typeof item === "object" && typeof (item as { key?: unknown }).key === "string") {
+          retrievedIds.add((item as { key: string }).key);
+        }
+      }
+    }
+  }
+
+  const goldAvailable = goldMemoryIds.some((id) => preStagedIds.has(id) || retrievedIds.has(id));
+  if (goldAvailable) return "extraction_or_reasoning_fail";
+  if (hadToolError) return "tool_selection_fail";
+  if (!hadReadTool) return "selection_missed";
+  if (retrievedIds.size > 0) return "selection_wrong";
+  return "protocol_fail";
 }
 
 function evaluateExactMatch(

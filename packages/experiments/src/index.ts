@@ -9,6 +9,7 @@ export type ExperimentConfig = {
 
 export {
   RQ1_CONDITIONS,
+  getRq1Conditions,
   buildRq1Input,
   runRq1Mock,
   type Rq1Condition,

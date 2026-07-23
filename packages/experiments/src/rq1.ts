@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { CanonicalTask, MemoryItem, ToolItem } from "@prologue/schemas";
 import type { Session } from "@prologue/session";
 
@@ -47,6 +46,20 @@ function hasOracleTool(condition: Rq1Condition): boolean {
   return condition === "oracle_tool" || condition === "oracle_intent_tool" || condition === "oracle_memory_tool" || condition === "oracle_all";
 }
 
+export function getRq1Conditions(task: Pick<CanonicalTask, "capabilities">): Rq1Condition[] {
+  const {
+    hasOracleIntent: supportsOracleIntent,
+    hasOracleMemory: supportsOracleMemory,
+    hasOracleTool: supportsOracleTool,
+  } = task.capabilities;
+  return RQ1_CONDITIONS.filter((condition) => {
+    if (hasOracleIntent(condition) && !supportsOracleIntent) return false;
+    if (hasOracleMemory(condition) && !supportsOracleMemory) return false;
+    if (hasOracleTool(condition) && !supportsOracleTool) return false;
+    return true;
+  });
+}
+
 function selectByIds<T extends { id: string }>(items: T[], ids: string[], label: string, taskId: string): T[] {
   const selected = items.filter((item) => ids.includes(item.id));
   if (selected.length !== ids.length) {
@@ -76,11 +89,32 @@ function fallbackCommonMemory(memoryPool: MemoryItem[]): MemoryItem[] {
   });
 }
 
+function usesPrestageExistingMemory(task: CanonicalTask): boolean {
+  return task.metadata.rq1MemoryOracleMode === "prestage_existing";
+}
+
+function markPreStaged(items: MemoryItem[], oracleIds: string[]): MemoryItem[] {
+  const selected = new Set(oracleIds);
+  return items.map((item) => {
+    if (!selected.has(item.id)) return item;
+    return {
+      ...item,
+      metadata: {
+        ...item.metadata,
+        promptInjected: true,
+      },
+    };
+  });
+}
+
 export function buildRq1Input(task: CanonicalTask, condition: Rq1Condition): Rq1ExperimentInput {
   const usesOracleIntent = hasOracleIntent(condition);
   const usesOracleMemory = hasOracleMemory(condition);
   const usesOracleTool = hasOracleTool(condition);
 
+  if (!getRq1Conditions(task).includes(condition)) {
+    throw new Error(`Task ${task.taskId} does not support RQ1 condition ${condition}.`);
+  }
   if (usesOracleIntent && !task.oracleIntent) {
     throw new Error(`Task ${task.taskId} does not provide oracleIntent.`);
   }
@@ -97,6 +131,9 @@ export function buildRq1Input(task: CanonicalTask, condition: Rq1Condition): Rq1
   const oracleMemory = usesOracleMemory
     ? selectByIds(task.memoryPool, task.oracleMemoryIds, "memory", task.taskId)
     : [];
+  const memory = usesPrestageExistingMemory(task)
+    ? markPreStaged(task.memoryPool, usesOracleMemory ? task.oracleMemoryIds : [])
+    : uniqueById([...commonMemory, ...oracleMemory]);
 
   return {
     taskId: task.taskId,
@@ -104,7 +141,7 @@ export function buildRq1Input(task: CanonicalTask, condition: Rq1Condition): Rq1
     condition,
     query: task.query,
     intentSpec: usesOracleIntent ? task.oracleIntent : undefined,
-    memory: uniqueById([...commonMemory, ...oracleMemory]),
+    memory,
     tools: usesOracleTool ? selectByIds(task.toolPool, task.oracleToolIds, "tool", task.taskId) : task.toolPool,
     usesOracleIntent,
     usesOracleMemory,
@@ -128,7 +165,7 @@ export async function runRq1Mock(tasks: CanonicalTask[], session: Session): Prom
   let successCount = 0;
 
   for (const task of tasks) {
-    for (const condition of RQ1_CONDITIONS) {
+    for (const condition of getRq1Conditions(task)) {
       const input = buildRq1Input(task, condition);
       const startedAt = new Date().toISOString();
       const mockResult = runMock(input);
@@ -156,18 +193,7 @@ export async function runRq1Mock(tasks: CanonicalTask[], session: Session): Prom
           usesOracleIntent: input.usesOracleIntent,
           usesOracleMemory: input.usesOracleMemory,
           usesOracleTool: input.usesOracleTool,
-          memoryIds: input.memory.map((item) => item.id),
-          toolIds: input.tools.map((item) => item.id),
         },
-      });
-      await session.logger.write({
-        level: "info",
-        type: "eval_result",
-        rq: "rq1",
-        taskId: task.taskId,
-        source: task.source,
-        method: "oracle_attribution_mock",
-        payload: { condition, ...mockResult, mock: true },
       });
 
       session.addTrajectory({
@@ -176,40 +202,38 @@ export async function runRq1Mock(tasks: CanonicalTask[], session: Session): Prom
         method: "oracle_attribution_mock",
         input: {
           query: input.query,
-          intentSpec: input.intentSpec,
           memoryIds: input.memory.map((item) => item.id),
           toolIds: input.tools.map((item) => item.id),
-          oracleCondition: condition,
         },
         prologue: {
-          mode: "oracle_attribution",
+          condition,
           usesOracleIntent: input.usesOracleIntent,
           usesOracleMemory: input.usesOracleMemory,
           usesOracleTool: input.usesOracleTool,
         },
-        steps: [
-          {
-            stepId: randomUUID(),
-            type: "prologue",
-            timestamp: startedAt,
-            output: {
-              condition,
-              memoryCount: input.memory.length,
-              toolCount: input.tools.length,
-            },
-            metadata: {},
-          },
-          {
-            stepId: randomUUID(),
-            type: "eval",
-            timestamp: new Date().toISOString(),
-            output: { ...mockResult, mock: true },
-            metadata: {},
-          },
-        ],
-        result: { success: mockResult.success, score: mockResult.success ? 1 : 0 },
+        steps: [],
+        result: {
+          success: mockResult.success,
+          score: mockResult.success ? 1 : 0,
+          error: mockResult.reason,
+        },
       });
-      await session.flush();
+
+      await session.logger.write({
+        level: mockResult.success ? "info" : "warn",
+        type: "eval_result",
+        rq: "rq1",
+        taskId: task.taskId,
+        source: task.source,
+        method: "oracle_attribution_mock",
+        payload: {
+          condition,
+          success: mockResult.success,
+          reason: mockResult.reason,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+        },
+      });
     }
   }
 

@@ -2,7 +2,7 @@ import { loadEnvIntoProcess, createClientFromEnv, LlmCallError } from "../packag
 import { readCanonicalTasks } from "../packages/data/dist/index.js";
 import {
   buildRq1Input,
-  RQ1_CONDITIONS,
+  getRq1Conditions,
   type Rq1Condition,
 } from "../packages/experiments/dist/rq1.js";
 import {
@@ -24,8 +24,8 @@ const WORKSPACE_ROOT = join(__dirname, "..");
  * RQ1 BFCL V4 Memory experiment with REAL LLM agent.
  *
  * Sample modes:
- *   - "sample5": 5 tasks (first kv-backend task of each scenario) × 8 = 40 runs (smoke test)
- *   - "full":     all 465 tasks × 8 conditions = 3720 runs (full RQ1 experiment)
+ *   - "sample5": 5 tasks (first kv-backend task of each scenario) × 4 = 20 runs (smoke test)
+ *   - "full":     all eligible tasks × 4 conditions = full BFCL RQ1 experiment
  *
  * Model: qwen3.5-27b via dashscope. Memory tools are simulated in-process
  * (no REST backend). Eval = exact_match against goldAnswerCandidates from
@@ -81,6 +81,7 @@ type RunResult = {
   providerError: boolean;
   derivedAnswer: string;
   goldCandidates: string[];
+  failureMode: string;
   reason: string;
 };
 
@@ -177,8 +178,8 @@ async function main(): Promise<void> {
     if (cp) {
       const valid = cp.completed.filter((r) => !r.executorError && !r.providerError);
       const errors = cp.completed.filter((r) => r.executorError || r.providerError);
-      results = valid;
-      for (const r of valid) {
+      results = valid.map((result) => ({ ...result, failureMode: result.failureMode ?? "unknown" }));
+      for (const r of results) {
         completedKeys.add(`${r.taskId}::${r.condition}`);
       }
       console.log(`resumeValidFrom: ${CONFIG.resumeValidFrom}`);
@@ -189,7 +190,13 @@ async function main(): Promise<void> {
   const session = await Session.start({
     rq: "rq1",
     method: METHOD,
-    config: { ...CONFIG, resumedFrom: CONFIG.resumeValidFrom || undefined, sampleSize: sample.length, totalRuns: sample.length * RQ1_CONDITIONS.length },
+    config: {
+      ...CONFIG,
+      resumedFrom: CONFIG.resumeValidFrom || undefined,
+      sampleSize: sample.length,
+      conditions: getRq1Conditions(sample[0] ?? tasks[0]),
+      totalRuns: sample.reduce((total, task) => total + getRq1Conditions(task).length, 0),
+    },
     dataset: {
       taskCount: tasks.length,
       sampledTaskIds: sample.map((t) => t.taskId),
@@ -221,19 +228,17 @@ async function main(): Promise<void> {
     }),
   );
 
-  // Build work items: tasks × 8 conditions.
+  // Build work items from the RQ1 components each task can identify.
   const workItems: Array<{ task: CanonicalTask; condition: Rq1Condition; runIndex: number }> = [];
   let runIndex = 0;
   for (const task of sample) {
-    for (const condition of RQ1_CONDITIONS) {
+    for (const condition of getRq1Conditions(task)) {
       runIndex += 1;
       workItems.push({ task, condition, runIndex });
     }
   }
   const totalRuns = workItems.length;
 
-  const results: RunResult[] = [];
-  const completedKeys = new Set<string>();
   let queueCursor = 0;
   let sinceLastCheckpoint = 0;
 
@@ -285,6 +290,7 @@ async function main(): Promise<void> {
         providerError,
         derivedAnswer: (result.metadata?.derivedAnswer as string) ?? "",
         goldCandidates: (result.metadata?.goldCandidates as string[]) ?? [],
+        failureMode: (result.metadata?.failureMode as string) ?? "unknown",
         reason: result.reason ?? "",
       };
       results.push(runResult);
@@ -317,10 +323,12 @@ async function main(): Promise<void> {
           score: result.score,
           steps: stepCount,
           durationMs,
+          failureMode: runResult.failureMode,
           executorError,
           providerError,
           derivedAnswer: runResult.derivedAnswer,
           goldCandidates: runResult.goldCandidates,
+          failureMode: runResult.failureMode,
           reason: result.reason,
         },
       });
@@ -334,6 +342,7 @@ async function main(): Promise<void> {
           memoryIds: input.memory.map((m) => m.id),
           toolIds: input.tools.map((t) => t.id),
           oracleCondition: condition,
+          rq1GoldMemoryIds: (input.evaluatorMetadata?.rq1GoldMemoryIds as string[]) ?? [],
         },
         prologue: {
           usesOracleIntent: input.usesOracleIntent,
@@ -396,6 +405,7 @@ async function main(): Promise<void> {
         providerError,
         derivedAnswer: "",
         goldCandidates: [],
+        failureMode: prefix,
         reason: `${prefix}: ${message}`,
       };
       results.push(runResult);
@@ -458,7 +468,7 @@ async function main(): Promise<void> {
     console.log(`reason: ${circuitTripped.reason}`);
     console.log(`completed runs: ${results.length}/${totalRuns}`);
     console.log(`\nThe checkpoint has been saved. To resume after fixing the API issue:`);
-    console.log(`  1. Check your dashscope account quota / billing at https://dashscope.console.aliyun.com/`);
+    console.log(`  1. Check the configured provider account quota / billing.`);
     console.log(`  2. Re-run this script — it will resume from ${results.length} completed runs.`);
     console.log(`\nsession: ${session.runDir}`);
     console.log(`checkpoint: ${checkpointPath(runDir)}`);
@@ -479,8 +489,9 @@ async function main(): Promise<void> {
   }
 
   // === Summary ===
+  const conditions = getRq1Conditions(sample[0] ?? tasks[0]);
   console.log("\n" + "=".repeat(80));
-  console.log(`=== SUMMARY: BFCL V4 Memory RQ1 (LLM, ${CONFIG.llmModel}, ${sample.length} tasks × ${RQ1_CONDITIONS.length} conditions) ===`);
+  console.log(`=== SUMMARY: BFCL V4 Memory RQ1 (LLM, ${CONFIG.llmModel}, ${sample.length} tasks × ${conditions.length} conditions) ===`);
   console.log("=".repeat(80));
 
   const byCondition: Record<string, { total: number; success: number; executorError: number; providerError: number; totalSteps: number; totalMs: number }> = {};
@@ -499,7 +510,7 @@ async function main(): Promise<void> {
   console.log("\n=== by condition ===");
   console.log("condition                     success  total   rate   avg_steps  avg_dur");
   console.log("-".repeat(80));
-  for (const cond of RQ1_CONDITIONS) {
+  for (const cond of conditions) {
     const s = byCondition[cond] ?? { total: 0, success: 0, executorError: 0, providerError: 0, totalSteps: 0, totalMs: 0 };
     const rate = s.total > 0 ? ((s.success / s.total) * 100).toFixed(1) : "0.0";
     const avgSteps = s.total > 0 ? (s.totalSteps / s.total).toFixed(1) : "0.0";
@@ -537,66 +548,65 @@ async function main(): Promise<void> {
     console.log(`         reason: ${r.reason}`);
   }
 
-  // === Dual-indicator attribution verification ===
-  // Under RQ1 direction A design, attribution has TWO dimensions:
-  //   1. Success rate: oracle_memory conditions should have >= baseline success
-  //      rate (pre-staging context in prompt makes answer reachable without
-  //      tool retrieval). Baseline may also succeed if LLM diligently calls
-  //      tools — that's fine, it's a real LLM capability signal.
-  //   2. Efficiency: oracle_memory conditions should use FEWER steps than
-  //      baseline (direct answer from pre-staged prompt vs tool retrieval
-  //      loop). This is the cleaner attribution signal when success rates
-  //      are close.
   console.log("\n" + "=".repeat(80));
-  console.log("=== Dual-indicator attribution verification ===");
+  console.log("=== Paired RQ1 attribution summary ===");
   console.log("=".repeat(80));
 
-  // Indicator 1: success rate — oracle_memory group >= baseline group
   const baselineSuccessRate = byCondition["baseline"] && byCondition["baseline"].total > 0
     ? byCondition["baseline"].success / byCondition["baseline"].total
     : 0;
-  const oracleMemoryConditions = ["oracle_memory", "oracle_intent_memory", "oracle_memory_tool", "oracle_all"] as const;
-  const oracleMemorySuccessRates = oracleMemoryConditions.map((c) => {
-    const s = byCondition[c];
-    return s && s.total > 0 ? s.success / s.total : 0;
-  });
-  const oracleMemoryAvgSuccessRate = oracleMemorySuccessRates.reduce((a, b) => a + b, 0) / oracleMemorySuccessRates.length;
-
-  console.log("\n--- Indicator 1: success rate ---");
-  console.log(`  baseline success rate:        ${(baselineSuccessRate * 100).toFixed(0)}% (${byCondition["baseline"]?.success ?? 0}/${byCondition["baseline"]?.total ?? 0})`);
-  console.log(`  oracle_memory group avg rate: ${(oracleMemoryAvgSuccessRate * 100).toFixed(0)}% (across ${oracleMemoryConditions.length} conditions)`);
-  const successGap = oracleMemoryAvgSuccessRate - baselineSuccessRate;
-  const successCheckOk = successGap >= 0;
-  console.log(`  gap (oracle_memory - baseline): ${(successGap * 100).toFixed(0)}% — ${successCheckOk ? "OK (oracle_memory >= baseline)" : "DEVIATION (oracle_memory < baseline)"}`);
-
-  // Indicator 2: efficiency — oracle_memory should use fewer steps than baseline
+  const oracleMemorySuccessRate = byCondition["oracle_memory"] && byCondition["oracle_memory"].total > 0
+    ? byCondition["oracle_memory"].success / byCondition["oracle_memory"].total
+    : 0;
+  const oracleToolSuccessRate = byCondition["oracle_tool"] && byCondition["oracle_tool"].total > 0
+    ? byCondition["oracle_tool"].success / byCondition["oracle_tool"].total
+    : 0;
+  const oracleAllSuccessRate = byCondition["oracle_memory_tool"] && byCondition["oracle_memory_tool"].total > 0
+    ? byCondition["oracle_memory_tool"].success / byCondition["oracle_memory_tool"].total
+    : 0;
+  const indexed = new Map(results.map((result) => [`${result.taskId}::${result.condition}`, result]));
+  const paired = results.filter((result) => result.condition === "baseline").map((baseline) => ({
+    baseline,
+    memory: indexed.get(`${baseline.taskId}::oracle_memory`),
+    tool: indexed.get(`${baseline.taskId}::oracle_tool`),
+    all: indexed.get(`${baseline.taskId}::oracle_memory_tool`),
+  }));
+  const recoveries = (selector: (pair: typeof paired[number]) => RunResult | undefined) => paired.filter((pair) => (
+    !pair.baseline.success && selector(pair)?.success
+  ));
+  const memoryRecoveries = recoveries((pair) => pair.memory);
+  const toolRecoveries = recoveries((pair) => pair.tool);
+  const jointRecoveries = recoveries((pair) => pair.all);
+  const baselineFailures = paired.filter((pair) => !pair.baseline.success);
+  const attributableBaselineFailures = baselineFailures.filter((pair) => (
+    ["selection_missed", "selection_wrong", "tool_selection_fail"].includes(pair.baseline.failureMode)
+  ));
+  const failureModeCounts: Record<string, number> = {};
+  for (const pair of baselineFailures) {
+    failureModeCounts[pair.baseline.failureMode] = (failureModeCounts[pair.baseline.failureMode] ?? 0) + 1;
+  }
   const baselineAvgSteps = byCondition["baseline"] && byCondition["baseline"].total > 0
     ? byCondition["baseline"].totalSteps / byCondition["baseline"].total
     : 0;
-  const oracleMemoryAvgSteps = oracleMemoryConditions.map((c) => {
-    const s = byCondition[c];
-    return s && s.total > 0 ? s.totalSteps / s.total : 0;
-  });
-  const oracleMemoryGroupAvgSteps = oracleMemoryAvgSteps.reduce((a, b) => a + b, 0) / oracleMemoryAvgSteps.length;
+  const oracleMemoryAvgSteps = byCondition["oracle_memory"] && byCondition["oracle_memory"].total > 0
+    ? byCondition["oracle_memory"].totalSteps / byCondition["oracle_memory"].total
+    : 0;
+  const successGap = oracleMemorySuccessRate - baselineSuccessRate;
+  const stepGap = baselineAvgSteps - oracleMemoryAvgSteps;
 
-  console.log("\n--- Indicator 2: efficiency (avg steps per run) ---");
-  console.log(`  baseline avg steps:           ${baselineAvgSteps.toFixed(1)}`);
-  console.log(`  oracle_memory group avg:      ${oracleMemoryGroupAvgSteps.toFixed(1)}`);
-  const stepGap = baselineAvgSteps - oracleMemoryGroupAvgSteps;
-  const efficiencyCheckOk = stepGap > 0;
-  console.log(`  gap (baseline - oracle_memory): ${stepGap.toFixed(1)} steps — ${efficiencyCheckOk ? "OK (oracle_memory more efficient)" : "DEVIATION (no efficiency gain)"}`);
+  console.log(`  baseline success:             ${(baselineSuccessRate * 100).toFixed(1)}%`);
+  console.log(`  oracle_memory success:        ${(oracleMemorySuccessRate * 100).toFixed(1)}% (delta ${(oracleMemorySuccessRate - baselineSuccessRate) * 100 >= 0 ? "+" : ""}${((oracleMemorySuccessRate - baselineSuccessRate) * 100).toFixed(1)} pp)`);
+  console.log(`  oracle_tool success:          ${(oracleToolSuccessRate * 100).toFixed(1)}% (delta ${(oracleToolSuccessRate - baselineSuccessRate) * 100 >= 0 ? "+" : ""}${((oracleToolSuccessRate - baselineSuccessRate) * 100).toFixed(1)} pp)`);
+  console.log(`  oracle_memory_tool success:   ${(oracleAllSuccessRate * 100).toFixed(1)}% (delta ${(oracleAllSuccessRate - baselineSuccessRate) * 100 >= 0 ? "+" : ""}${((oracleAllSuccessRate - baselineSuccessRate) * 100).toFixed(1)} pp)`);
+  console.log(`  baseline failures:            ${baselineFailures.length}/${paired.length}`);
+  console.log(`  memory paired recoveries:     ${memoryRecoveries.length}/${baselineFailures.length}`);
+  console.log(`  tool paired recoveries:       ${toolRecoveries.length}/${baselineFailures.length}`);
+  console.log(`  joint paired recoveries:      ${jointRecoveries.length}/${baselineFailures.length}`);
+  console.log(`  attributable baseline failures: ${attributableBaselineFailures.length}/${baselineFailures.length}`);
+  console.log("  baseline failure modes:", failureModeCounts);
+  console.log(`  baseline - memory avg steps:  ${stepGap.toFixed(1)}`);
 
-  // Per-condition breakdown for the efficiency dimension
-  console.log("\n--- Per-condition step counts (lower = more efficient) ---");
-  for (const cond of RQ1_CONDITIONS) {
-    const s = byCondition[cond] ?? { total: 0, success: 0, executorError: 0, providerError: 0, totalSteps: 0, totalMs: 0 };
-    const avgSteps = s.total > 0 ? (s.totalSteps / s.total).toFixed(1) : "n/a";
-    const hasOracleMem = cond === "oracle_memory" || cond === "oracle_intent_memory" || cond === "oracle_memory_tool" || cond === "oracle_all";
-    const tag = hasOracleMem ? "[M]" : "   ";
-    console.log(`  ${tag} ${cond.padEnd(28)} avg_steps=${avgSteps}`);
-  }
-
-  const allPassed = successCheckOk && efficiencyCheckOk;
+  const allPassed = results.length === totalRuns && paired.length === sample.length;
 
   const totalSuccess = results.filter((r) => r.success).length;
   const totalExecutorErrors = results.filter((r) => r.executorError).length;
@@ -620,13 +630,18 @@ async function main(): Promise<void> {
       byCondition,
       byTask,
       attributionChecksPassed: allPassed,
-      indicators: {
+      attribution: {
+        baselineSuccessRate,
+        oracleMemorySuccessRate,
+        oracleToolSuccessRate,
+        oracleMemoryToolSuccessRate: oracleAllSuccessRate,
+        memoryRecoveries: memoryRecoveries.length,
+        toolRecoveries: toolRecoveries.length,
+        jointRecoveries: jointRecoveries.length,
+        attributableBaselineFailures: attributableBaselineFailures.length,
+        baselineFailureModes: failureModeCounts,
         successGap,
         stepGap,
-        baselineSuccessRate,
-        oracleMemoryAvgSuccessRate,
-        baselineAvgSteps,
-        oracleMemoryGroupAvgSteps,
       },
     },
   });
@@ -634,7 +649,7 @@ async function main(): Promise<void> {
   await session.finish("completed");
   console.log(`\nsession: ${session.runDir}`);
   console.log(`checkpoint: ${checkpointPath(runDir)}`);
-  console.log(allPassed ? "\nALL DUAL-INDICATOR CHECKS PASSED" : "\nSOME CHECKS DEVIATED (see indicators above)");
+  console.log(allPassed ? "\nALL RQ1 COVERAGE CHECKS PASSED" : "\nRQ1 COVERAGE INCOMPLETE (see summary above)");
   process.exit(0);
 }
 
