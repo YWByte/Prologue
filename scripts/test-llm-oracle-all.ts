@@ -54,7 +54,7 @@ const CONFIG = {
   llmModel: "qwen3.5-27b",
   enableThinking: false,
   maxSteps: 800,
-  maxTokens: 2048,
+  maxTokens: 4096,
   rpm: 1000,
   apiMaxConcurrency: 50,
   runConcurrency: 10,
